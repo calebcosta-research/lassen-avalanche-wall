@@ -2,7 +2,8 @@ import { createFileRoute } from '@tanstack/react-router';
 import { Map, type MapRef } from '@vis.gl/react-maplibre';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { JourneyHud } from '../components/avalanche/journey-hud';
+import { animateHud, hudContentKey, JourneyHud } from '../components/avalanche/journey-hud';
+import { AVI, FONT_DISPLAY } from '../components/avalanche/theme';
 import { loadRouteData, loadSimData, type SimMeta } from '../lib/avalanche/data';
 import { AvalancheEngine } from '../lib/avalanche/engine';
 import {
@@ -28,22 +29,26 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 // `/avalanche/screen?c=<col>&r=<row>` renders one 1920 x 1080 unit of the 3 x 2 wall.
 // Without c/r it renders the whole wall in one window (handy on a laptop).
 // `?t=<seconds>` freezes this screen at one journey time (rehearsal, screenshots).
-type ScreenSearch = { c?: number; r?: number; t?: number };
+// `?prewarm=0` skips the tile warm-up pass (it is also skipped when `t` freezes time).
+type ScreenSearch = { c?: number; r?: number; t?: number; prewarm?: boolean };
 
-const HUD_INTERVAL_MS = 33; // React HUD refresh; the map itself updates every frame
 const MAX_PIXEL_RATIO = 1.5;
+/** Tiles kept per source; the default only covers the current view. */
+const MAX_TILE_CACHE = 1200;
 
 export const Route = createFileRoute('/avalanche/screen')({
     validateSearch: (search: Record<string, unknown>): ScreenSearch => ({
         c: parseCoord(search.c, WALL_COLS),
         r: parseCoord(search.r, WALL_ROWS),
-        t: parseTime(search.t)
+        t: parseTime(search.t),
+        prewarm: search.prewarm === '0' || search.prewarm === 0 ? false : undefined
     }),
     component: AvalancheScreen
 });
 
 function AvalancheScreen() {
-    const { c, r, t: frozenT } = Route.useSearch();
+    const { c, r, t: frozenT, prewarm } = Route.useSearch();
+    const shouldPrewarm = prewarm !== false && frozenT === undefined;
     const region: WallRegion =
         c === undefined || r === undefined
             ? { x: 0, y: 0, w: WALL_W, h: WALL_H }
@@ -57,9 +62,12 @@ function AvalancheScreen() {
     const [clientWidth, setClientWidth] = useState(UNIT_W);
     const [map, setMap] = useState<ReturnType<MapRef['getMap']> | null>(null);
     const [mapReady, setMapReady] = useState(false);
+    // null = not started; 0..1 while warming; 1 when done (or skipped)
+    const [warm, setWarm] = useState<number | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [viewport, setViewport] = useState({ w: 0, h: 0 });
     const layersRef = useRef<JourneyMapLayers | null>(null);
+    const hudRef = useRef<HTMLDivElement | null>(null);
 
     // Data + engine are browser-only (BEST_PRACTICES.md section 4).
     useEffect(() => {
@@ -123,30 +131,59 @@ function AvalancheScreen() {
         };
     }, [map, timeline]);
 
-    // One animation loop: shared clock -> journey frame -> map (every frame) + HUD (~30 Hz).
+    // One animation loop: shared clock -> journey frame -> map + markers + HUD motion, all
+    // in the same frame. React re-renders the HUD only when its text/structure changes.
     useEffect(() => {
         if (!timeline) return;
         const engine = AvalancheEngine.getInstance('screen');
         let raf = 0;
-        let lastHud = 0;
-        let lastHudT = -1;
+        let lastKey = '';
         const tick = (now: number) => {
-            const frame = timeline.frameAt(frozenT ?? engine.journeyTime(timeline.total));
+            const frame = timeline.frameAt(
+                frozenT ?? engine.journeyTimeForFrame(timeline.total, now)
+            );
             const width = containerRef.current?.clientWidth || UNIT_W;
-            if (mapReady) layersRef.current?.update(frame, region, width);
-            // Re-render the HUD only when journey time moved (nothing to do while paused).
-            if (now - lastHud >= HUD_INTERVAL_MS && frame.t !== lastHudT) {
-                lastHud = now;
-                lastHudT = frame.t;
+            if (mapReady && warm === 1) layersRef.current?.update(frame, region, width);
+            const key = hudContentKey(frame);
+            if (key !== lastKey) {
+                lastKey = key;
                 setHudFrame(frame);
             }
+            animateHud(hudRef.current, frame, timeline);
             raf = requestAnimationFrame(tick);
         };
         raf = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(raf);
         // region is derived from c/r; listing its fields keeps the loop stable across renders
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [timeline, mapReady, frozenT, region.x, region.y, region.w, region.h]);
+    }, [timeline, mapReady, warm, frozenT, region.x, region.y, region.w, region.h]);
+
+    // Tile warm-up pass, once per page load, before playback is shown.
+    useEffect(() => {
+        if (!mapReady || !timeline || warm !== null) return;
+        if (!shouldPrewarm) {
+            setWarm(1);
+            return;
+        }
+        let cancelled = false;
+        setWarm(0);
+        const width = containerRef.current?.clientWidth || UNIT_W;
+        void layersRef.current
+            ?.prewarm(
+                timeline,
+                region,
+                width,
+                (f) => setWarm(f >= 1 ? 0.999 : f),
+                () => cancelled
+            )
+            .then(() => {
+                if (!cancelled) setWarm(1);
+            });
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [mapReady, timeline]);
 
     return (
         <main className="flex h-screen w-screen items-center justify-center overflow-hidden bg-black text-white">
@@ -167,18 +204,23 @@ function AvalancheScreen() {
                         pixelRatio={Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO)}
                         fadeDuration={0}
                         refreshExpiredTiles={false}
+                        // Keep decoded tiles for the whole route in memory across loops.
+                        maxTileCacheSize={MAX_TILE_CACHE}
                         // Extended toward the wall centre for the off-axis camera; the stage crops it.
                         style={{ position: 'absolute', ...rig.box }}
                     />
                 ) : null}
+                {warm !== null && warm < 1 ? <WarmupOverlay progress={warm} /> : null}
                 {timeline && hudFrame ? (
-                    <JourneyHud
-                        frame={hudFrame}
-                        timeline={timeline}
-                        sim={simMeta}
-                        region={region}
-                        clientWidth={clientWidth}
-                    />
+                    <div ref={hudRef} className="pointer-events-none absolute inset-0">
+                        <JourneyHud
+                            frame={hudFrame}
+                            timeline={timeline}
+                            sim={simMeta}
+                            region={region}
+                            clientWidth={clientWidth}
+                        />
+                    </div>
                 ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-[4vh] text-white/70">
                         {error
@@ -202,4 +244,37 @@ function parseTime(value: unknown) {
     const n =
         typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
     return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+function WarmupOverlay({ progress }: { progress: number }) {
+    return (
+        <div
+            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-[2vh]"
+            style={{ background: AVI.baseSolid, fontFamily: FONT_DISPLAY, color: AVI.ink }}
+        >
+            <p
+                style={{
+                    fontSize: '2.4vh',
+                    fontWeight: 600,
+                    letterSpacing: '0.2em',
+                    textTransform: 'uppercase',
+                    color: AVI.ice
+                }}
+            >
+                Preparing route tiles
+            </p>
+            <div style={{ width: '40%', height: '0.8vh', background: AVI.raised }}>
+                <div
+                    style={{
+                        width: `${Math.round(progress * 100)}%`,
+                        height: '100%',
+                        background: AVI.ice
+                    }}
+                />
+            </div>
+            <p style={{ fontSize: '5vh', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                {Math.round(progress * 100)}%
+            </p>
+        </div>
+    );
 }

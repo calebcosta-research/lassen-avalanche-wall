@@ -78,6 +78,17 @@ export class AvalancheEngine extends BusEngine<AvalancheStoreState> {
         return journeyTimeAt(this.store.state.clock, this.serverNow(), total);
     }
 
+    /**
+     * Journey time for an animation frame, from its requestAnimationFrame timestamp.
+     * Frame timestamps are evenly spaced at the display's refresh rate, while reading the
+     * clock inside the callback picks up however late the callback happened to run, so
+     * using the timestamp gives evenly spaced camera steps (no speed wobble).
+     */
+    journeyTimeForFrame(total: number, rafTimestamp: number) {
+        const serverMs = performance.timeOrigin + rafTimestamp + this.store.state.serverOffsetMs;
+        return journeyTimeAt(this.store.state.clock, serverMs, total);
+    }
+
     // ---- control intents ----------------------------------------------------------------
 
     play(total: number) {

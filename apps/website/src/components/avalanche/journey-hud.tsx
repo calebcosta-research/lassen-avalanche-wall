@@ -6,7 +6,7 @@
 // unit only pays for the one or two panels it actually displays. Type sizes target ~10 m
 // viewing distance.
 
-import { useMemo, type CSSProperties, type ReactNode } from 'react';
+import { type CSSProperties, type ReactNode } from 'react';
 
 import {
     DANGER_STYLE,
@@ -433,17 +433,16 @@ function Toasts({ frame }: { frame: JourneyFrame }) {
             style={{ left: 2 * UNIT_W + PAD, top: UNIT_H + PAD / 2, width: INNER_W }}
         >
             {frame.toasts.map(({ event, index, ageS }) => {
+                const firedAt = frame.t - ageS;
                 const style = ZONE_STYLE[event.zone];
-                const enter = smoothstep(0, 0.8, ageS);
-                const leave = 1 - smoothstep(TOAST_LIFETIME_S - 1.5, TOAST_LIFETIME_S, ageS);
                 const leaving = event.zone === 0;
                 return (
                     <div
                         key={index}
+                        data-toast-at={firedAt}
                         className="relative flex overflow-hidden"
                         style={{
-                            opacity: enter * leave,
-                            transform: `translateX(${(1 - enter) * 160}px)`,
+                            ...toastMotion(ageS),
                             background: AVI.base,
                             border: `2px solid ${AVI.line}`,
                             borderRadius: 6
@@ -551,14 +550,11 @@ function Swatch({ color }: { color: string }) {
 }
 
 function TriggerBanner({ frame }: { frame: JourneyFrame }) {
-    const a =
-        frame.phase === 'sim-approach'
-            ? smoothstep(0.6, 1, frame.phaseProgress)
-            : 1 - smoothstep(0.8, 1, frame.phaseProgress);
     return (
         <div
+            data-hud="banner"
             className="absolute flex justify-center"
-            style={{ left: UNIT_W, top: PAD, width: UNIT_W, opacity: a }}
+            style={{ left: UNIT_W, top: PAD, width: UNIT_W, opacity: bannerOpacity(frame) }}
         >
             <Panel
                 x={0}
@@ -700,28 +696,44 @@ const PROFILE_W = WALL_W - PROFILE_LEFT - PAD;
 const PLOT_TOP = 54;
 const PLOT_BOTTOM = PROFILE_H - 48;
 
+type ProfileGeometry = {
+    line: string;
+    runs: Array<{ x0: number; w: number; color: string; zone: number }>;
+    ticks: number[];
+    x: (d: number) => number;
+    y: (e: number) => number;
+};
+
+const profileCache = new WeakMap<RouteData, ProfileGeometry>();
+
+function profileGeometry(route: RouteData): ProfileGeometry {
+    const cached = profileCache.get(route);
+    if (cached) return cached;
+    const { dist, elev } = route.samples;
+    const lo = Math.min(...elev) - 50;
+    const hi = Math.max(...elev) + 50;
+    const x = (d: number) => (d / route.total_m) * PROFILE_W;
+    const y = (e: number) => PLOT_BOTTOM - ((e - lo) / (hi - lo)) * (PLOT_BOTTOM - PLOT_TOP);
+    const step = Math.max(1, Math.floor(dist.length / 800));
+    let line = '';
+    for (let i = 0; i < dist.length; i += step)
+        line += `${x(dist[i]).toFixed(1)},${y(elev[i]).toFixed(1)} `;
+    const runs = route.events.map((e) => ({
+        x0: x(e.dist_m),
+        w: x(e.length_m + 10),
+        color: ZONE_STYLE[e.zone].color,
+        zone: e.zone
+    }));
+    const ticks: number[] = [];
+    for (let km = 0; km * 1000 <= route.total_m; km += 2.5) ticks.push(km);
+    const geometry = { line, runs, ticks, x, y };
+    profileCache.set(route, geometry);
+    return geometry;
+}
+
 function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline }) {
     const route = timeline.route;
-    const geometry = useMemo(() => {
-        const { dist, elev } = route.samples;
-        const lo = Math.min(...elev) - 50;
-        const hi = Math.max(...elev) + 50;
-        const x = (d: number) => (d / route.total_m) * PROFILE_W;
-        const y = (e: number) => PLOT_BOTTOM - ((e - lo) / (hi - lo)) * (PLOT_BOTTOM - PLOT_TOP);
-        const step = Math.max(1, Math.floor(dist.length / 800));
-        let line = '';
-        for (let i = 0; i < dist.length; i += step)
-            line += `${x(dist[i]).toFixed(1)},${y(elev[i]).toFixed(1)} `;
-        const runs = route.events.map((e) => ({
-            x0: x(e.dist_m),
-            w: x(e.length_m + 10),
-            color: ZONE_STYLE[e.zone].color,
-            zone: e.zone
-        }));
-        const ticks: number[] = [];
-        for (let km = 0; km * 1000 <= route.total_m; km += 2.5) ticks.push(km);
-        return { line, runs, x, y, ticks };
-    }, [route]);
+    const geometry = profileGeometry(route);
     const mx = geometry.x(frame.dist);
     const my = geometry.y(frame.elev);
     return (
@@ -753,7 +765,14 @@ function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline 
                 >
                     ROUTE PROFILE · AVALANCHE TERRAIN ALONG THE WAY
                 </text>
-                <rect x={0} y={0} width={mx} height={PROFILE_H} fill="rgba(159,216,255,0.06)" />
+                <rect
+                    data-hud="shade"
+                    x={0}
+                    y={0}
+                    width={mx}
+                    height={PROFILE_H}
+                    fill="rgba(159,216,255,0.06)"
+                />
                 {geometry.ticks.map((km) => (
                     <g key={km}>
                         <line
@@ -788,24 +807,29 @@ function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline 
                     ) : null
                 )}
                 <polyline points={geometry.line} fill="none" stroke={AVI.ice} strokeWidth={5} />
-                <line
-                    x1={mx}
-                    x2={mx}
-                    y1={PLOT_TOP - 10}
-                    y2={PLOT_BOTTOM + 16}
-                    stroke={AVI.ink}
-                    strokeWidth={4}
-                />
-                <rect
-                    x={mx - 15}
-                    y={my - 15}
-                    width={30}
-                    height={30}
-                    fill={ZONE_STYLE[frame.zone].color}
-                    stroke="#fff"
-                    strokeWidth={5}
-                    transform={`rotate(45 ${mx} ${my})`}
-                />
+                {/* Position is animated per frame by animateHud(); React sets the colour. */}
+                <g data-hud="cursor" transform={`translate(${mx} 0)`}>
+                    <line
+                        x1={0}
+                        x2={0}
+                        y1={PLOT_TOP - 10}
+                        y2={PLOT_BOTTOM + 16}
+                        stroke={AVI.ink}
+                        strokeWidth={4}
+                    />
+                </g>
+                <g data-hud="diamond" transform={`translate(${mx} ${my})`}>
+                    <rect
+                        x={-15}
+                        y={-15}
+                        width={30}
+                        height={30}
+                        fill={ZONE_STYLE[frame.zone].color}
+                        stroke="#fff"
+                        strokeWidth={5}
+                        transform="rotate(45)"
+                    />
+                </g>
                 <text
                     x={geometry.x(route.summit.dist_m)}
                     y={geometry.y(route.summit.elev_m) - 22}
@@ -820,4 +844,53 @@ function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline 
             </svg>
         </div>
     );
+}
+
+// ---- per-frame motion, applied without React -----------------------------------------
+
+function toastMotion(ageS: number): CSSProperties {
+    const enter = smoothstep(0, 0.8, ageS);
+    const leave = 1 - smoothstep(TOAST_LIFETIME_S - 1.5, TOAST_LIFETIME_S, ageS);
+    return { opacity: enter * leave, transform: `translateX(${(1 - enter) * 160}px)` };
+}
+
+function bannerOpacity(frame: JourneyFrame) {
+    return frame.phase === 'sim-approach'
+        ? smoothstep(0.6, 1, frame.phaseProgress)
+        : 1 - smoothstep(0.8, 1, frame.phaseProgress);
+}
+
+/**
+ * Signature of everything the HUD shows as text or structure. React re-renders only when
+ * this changes (a few times a second); continuous motion goes through animateHud().
+ */
+export function hudContentKey(frame: JourneyFrame) {
+    return [
+        frame.phase,
+        frame.zone,
+        frame.legKind,
+        (frame.dist / 1000).toFixed(1),
+        Math.round(frame.elev),
+        frame.currentEvent?.i ?? -1,
+        frame.toasts.map((toast) => toast.index).join(','),
+        frame.simTime === null ? -1 : Math.floor(frame.simTime)
+    ].join('|');
+}
+
+/** Per-frame HUD motion: toast slide/fade, profile cursor, banner fade. Direct DOM writes. */
+export function animateHud(root: HTMLElement | null, frame: JourneyFrame, timeline: Timeline) {
+    if (!root) return;
+    for (const node of root.querySelectorAll<HTMLElement>('[data-toast-at]')) {
+        const motion = toastMotion(frame.t - Number(node.dataset.toastAt));
+        node.style.opacity = String(motion.opacity);
+        node.style.transform = String(motion.transform);
+    }
+    const geometry = profileGeometry(timeline.route);
+    const mx = geometry.x(frame.dist);
+    const my = geometry.y(frame.elev);
+    root.querySelector('[data-hud="cursor"]')?.setAttribute('transform', `translate(${mx} 0)`);
+    root.querySelector('[data-hud="diamond"]')?.setAttribute('transform', `translate(${mx} ${my})`);
+    root.querySelector('[data-hud="shade"]')?.setAttribute('width', String(mx));
+    const banner = root.querySelector<HTMLElement>('[data-hud="banner"]');
+    if (banner) banner.style.opacity = String(bannerOpacity(frame));
 }

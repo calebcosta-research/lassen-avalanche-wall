@@ -14,13 +14,18 @@ import type {
 } from 'maplibre-gl';
 
 import { AVALANCHE_DATA_BASE, ZONE_STYLE, type LonLat, type RouteData, type SimData } from './data';
-import { clamp, smoothstep, WALL_H, WALL_W, type JourneyFrame } from './timeline';
+import { MarkerOverlay } from './marker-overlay';
+import { clamp, smoothstep, WALL_H, WALL_W, type JourneyFrame, type Timeline } from './timeline';
 
 export const JOURNEY_MAP_STYLE =
     'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json';
 const TERRARIUM_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 
 const ZONES_OPACITY = 0.34;
+/** Prewarm: one stop every this many journey seconds while travelling. */
+const PREWARM_STEP_S = 5;
+/** Longest wait for one stop's tiles; slow networks move on rather than stall. */
+const PREWARM_STOP_TIMEOUT_MS = 3000;
 const TERRAIN_EXAGGERATION = 1.3;
 
 /**
@@ -87,13 +92,7 @@ const SIZES = {
     routeAll: 7,
     routeDone: 11,
     routeCasing: 19,
-    travellerRadius: 20,
-    travellerStroke: 6,
-    srcRadius: 18,
-    srcStroke: 5,
     aheadRadius: 9,
-    trigLine: 5,
-    arrowLine: 12,
     releaseLine: 6
 };
 
@@ -112,6 +111,10 @@ export class JourneyMapLayers {
     /** The sim texture was flagged for upload last frame; stop uploading this frame. */
     private simUploadPending = false;
     private readonly paintCache = new Map<string, unknown>();
+    private readonly markers: MarkerOverlay;
+    private inUpdate = false;
+    private lastFrame: JourneyFrame | null = null;
+    private markerScale = 1;
     private readonly aheadStarts: Array<{ dist: number; p: LonLat }>;
 
     constructor(map: MaplibreMap, route: RouteData) {
@@ -123,6 +126,13 @@ export class JourneyMapLayers {
         // Dev-only handle for inspecting the live map from the console / test scripts.
         if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__aviMap = map;
         this.addBaseLayers();
+        this.markers = new MarkerOverlay(map);
+        // Renders we didn't drive (tiles arriving while paused can change terrain height
+        // under a marker) re-place the markers with the last frame.
+        map.on('render', () => {
+            if (!this.inUpdate && this.lastFrame)
+                this.markers.update(this.lastFrame, this.markerScale);
+        });
     }
 
     attachSim(sim: SimData) {
@@ -202,10 +212,70 @@ export class JourneyMapLayers {
         this.applyCamera(frame, region, scale);
         if (Math.abs(scale - this.lastScale) > 1e-3) this.applyScale(scale);
         this.updateProgress(frame);
-        this.updateTraveller(frame);
-        this.updateTrigger(frame);
         this.updateAhead(frame);
         this.updateSim(frame);
+        // Render now, inside our animation frame, instead of on MapLibre's next one. The
+        // map then shows exactly this frame's camera, and the SVG markers placed below
+        // (same transform) are presented together with it: no one-frame drift.
+        this.inUpdate = true;
+        this.map.redraw();
+        this.inUpdate = false;
+        this.lastFrame = frame;
+        this.markerScale = scale;
+        this.markers.update(frame, scale);
+    }
+
+    /**
+     * Fly the camera through every view the journey will use and wait for its tiles, so
+     * playback runs from warm caches instead of decoding tiles mid-route. The route is
+     * fixed, so the views are known in advance. Run before playback starts.
+     */
+    async prewarm(
+        timeline: Timeline,
+        region: WallRegion,
+        clientWidth: number,
+        onProgress: (fraction: number) => void,
+        isCancelled: () => boolean
+    ) {
+        const scale = clientWidth / region.w;
+        const times: number[] = [];
+        for (let t = 0; t < timeline.simStart; t += PREWARM_STEP_S) times.push(t);
+        // The swing round to the avalanche passes through new views: sample it densely.
+        for (let u = 0; u <= 1.0001; u += 0.2) times.push(timeline.simStart + u * 6);
+        times.push((timeline.simStart + timeline.simEnd) / 2);
+        for (let t = timeline.simEnd; t < timeline.total; t += PREWARM_STEP_S) times.push(t);
+
+        const started = performance.now();
+        let timeouts = 0;
+        for (const [i, t] of times.entries()) {
+            if (isCancelled()) return;
+            this.applyCamera(timeline.frameAt(t), region, scale);
+            if (!(await this.waitForTiles())) timeouts++;
+            onProgress((i + 1) / times.length);
+        }
+        if (import.meta.env.DEV) {
+            (globalThis as Record<string, unknown>).__aviWarm = {
+                stops: times.length,
+                timeouts,
+                ms: Math.round(performance.now() - started)
+            };
+        }
+        this.lastFrameKey = ''; // make sure the first real frame is applied
+    }
+
+    private waitForTiles() {
+        // Resolves true when the view's tiles are in, false if we gave up waiting.
+        return new Promise<boolean>((resolve) => {
+            const finish = (loaded: boolean) => {
+                clearTimeout(timer);
+                this.map.off('idle', onIdle);
+                resolve(loaded);
+            };
+            const onIdle = () => finish(true);
+            const timer = setTimeout(() => finish(false), PREWARM_STOP_TIMEOUT_MS);
+            this.map.on('idle', onIdle);
+            this.map.triggerRepaint();
+        });
     }
 
     private applyCamera(frame: JourneyFrame, region: WallRegion, scale: number) {
@@ -345,87 +415,6 @@ export class JourneyMapLayers {
                 'circle-stroke-width': 1
             }
         });
-
-        map.addSource('trigger', { type: 'geojson', data: fc([]) });
-        map.addLayer({
-            id: 'trigger-line',
-            type: 'line',
-            source: 'trigger',
-            filter: ['==', ['get', 'kind'], 'line'],
-            layout: lineLayout,
-            paint: {
-                'line-color': '#ffffff',
-                'line-opacity': ['get', 'a'],
-                'line-width': 1,
-                'line-dasharray': [2, 2]
-            }
-        });
-        map.addLayer({
-            id: 'trigger-arrow',
-            type: 'line',
-            source: 'trigger',
-            filter: ['==', ['get', 'kind'], 'arrow'],
-            layout: lineLayout,
-            paint: { 'line-color': '#fb8c00', 'line-opacity': ['get', 'a'], 'line-width': 1 }
-        });
-        map.addLayer({
-            id: 'trigger-head',
-            type: 'fill',
-            source: 'trigger',
-            filter: ['==', ['get', 'kind'], 'head'],
-            paint: { 'fill-color': '#fb8c00', 'fill-opacity': ['get', 'a'] }
-        });
-        map.addLayer({
-            id: 'trigger-pulse',
-            type: 'circle',
-            source: 'trigger',
-            filter: ['==', ['get', 'kind'], 'src'],
-            paint: {
-                'circle-color': 'rgba(0,0,0,0)',
-                'circle-stroke-color': ZONE_STYLE[3].color,
-                'circle-stroke-opacity': ['get', 'pa'],
-                'circle-radius': ['get', 'pr'],
-                'circle-stroke-width': 1
-            }
-        });
-        map.addLayer({
-            id: 'trigger-src',
-            type: 'circle',
-            source: 'trigger',
-            filter: ['==', ['get', 'kind'], 'src'],
-            paint: {
-                'circle-color': ZONE_STYLE[3].color,
-                'circle-opacity': ['get', 'a'],
-                'circle-stroke-color': '#ffffff',
-                'circle-stroke-opacity': ['get', 'a'],
-                'circle-radius': 1,
-                'circle-stroke-width': 1
-            }
-        });
-
-        map.addSource('traveller', { type: 'geojson', data: fc([]) });
-        map.addLayer({
-            id: 'traveller-halo',
-            type: 'circle',
-            source: 'traveller',
-            paint: {
-                'circle-color': '#ffffff',
-                'circle-opacity': 0.18,
-                'circle-radius': 1,
-                'circle-blur': 0.6
-            }
-        });
-        map.addLayer({
-            id: 'traveller',
-            type: 'circle',
-            source: 'traveller',
-            paint: {
-                'circle-color': ['get', 'color'],
-                'circle-radius': 1,
-                'circle-stroke-color': '#ffffff',
-                'circle-stroke-width': 1
-            }
-        });
     }
 
     private applyScale(scale: number) {
@@ -437,16 +426,8 @@ export class JourneyMapLayers {
         set('route-casing', 'line-width', px(SIZES.routeCasing));
         set('route-all', 'line-width', px(SIZES.routeAll));
         set('route-done', 'line-width', px(SIZES.routeDone));
-        set('traveller', 'circle-radius', px(SIZES.travellerRadius));
-        set('traveller', 'circle-stroke-width', px(SIZES.travellerStroke));
-        set('traveller-halo', 'circle-radius', px(SIZES.travellerRadius * 3));
-        set('trigger-src', 'circle-radius', px(SIZES.srcRadius));
-        set('trigger-src', 'circle-stroke-width', px(SIZES.srcStroke));
-        set('trigger-pulse', 'circle-stroke-width', px(SIZES.srcStroke));
         set('ahead', 'circle-radius', px(SIZES.aheadRadius));
         set('ahead', 'circle-stroke-width', px(2));
-        set('trigger-line', 'line-width', px(SIZES.trigLine));
-        set('trigger-arrow', 'line-width', px(SIZES.arrowLine));
         set('release-line', 'line-width', px(SIZES.releaseLine));
     }
 
@@ -456,65 +437,6 @@ export class JourneyMapLayers {
         if (Math.abs(p - this.lastProgress) < 0.0004) return;
         this.lastProgress = p;
         this.map.setPaintProperty('route-done', 'line-gradient', progressGradient(p));
-    }
-
-    private updateTraveller(frame: JourneyFrame) {
-        const source = this.map.getSource<GeoJSONSource>('traveller');
-        source?.setData(
-            fc([
-                {
-                    type: 'Feature',
-                    properties: { color: ZONE_STYLE[frame.zone].color },
-                    geometry: { type: 'Point', coordinates: frame.position }
-                }
-            ])
-        );
-    }
-
-    private updateTrigger(frame: JourneyFrame) {
-        const source = this.map.getSource<GeoJSONSource>('trigger');
-        if (!source) return;
-        const tr = frame.trigger;
-        if (!tr || tr.alpha <= 0.01) {
-            source.setData(fc([]));
-            return;
-        }
-        const a = tr.alpha;
-        const here = frame.position;
-        // Gentle 2.4 s pulse on the trigger point (no flashing: BEST_PRACTICES.md section 6).
-        const phase = (frame.t / 2.4) % 1;
-        const metersPerDeg = 111_320;
-        const scale = this.lastScale > 0 ? this.lastScale : 1;
-        const head = arrowHead(tr.up, here, 55 / metersPerDeg);
-        source.setData(
-            fc([
-                {
-                    type: 'Feature',
-                    properties: { kind: 'line', a: a * 0.85 },
-                    geometry: { type: 'LineString', coordinates: [here, tr.src] }
-                },
-                {
-                    type: 'Feature',
-                    properties: { kind: 'arrow', a },
-                    geometry: { type: 'LineString', coordinates: [tr.up, head.base] }
-                },
-                {
-                    type: 'Feature',
-                    properties: { kind: 'head', a },
-                    geometry: { type: 'Polygon', coordinates: [head.ring] }
-                },
-                {
-                    type: 'Feature',
-                    properties: {
-                        kind: 'src',
-                        a,
-                        pa: a * (1 - phase) * 0.9,
-                        pr: (SIZES.srcRadius + phase * 70) * scale
-                    },
-                    geometry: { type: 'Point', coordinates: tr.src }
-                }
-            ])
-        );
     }
 
     private updateAhead(frame: JourneyFrame) {
@@ -629,21 +551,6 @@ function buildStartZoneList(route: RouteData) {
         if (!seen.has(key)) seen.set(key, { dist: dist[i], p: s });
     }
     return [...seen.values()];
-}
-
-/** Arrowhead triangle at `tip`, pointing from `tail` to `tip`; size in degrees of latitude. */
-function arrowHead(tail: LonLat, tip: LonLat, size: number) {
-    const kx = Math.cos((tip[1] * Math.PI) / 180); // lon degrees are shorter by cos(lat)
-    let dx = (tip[0] - tail[0]) * kx;
-    let dy = tip[1] - tail[1];
-    const len = Math.hypot(dx, dy) || 1;
-    dx /= len;
-    dy /= len;
-    const base: LonLat = [tip[0] - (dx * size) / kx, tip[1] - dy * size];
-    const wing = size * 0.6;
-    const left: LonLat = [base[0] - (dy * wing) / kx, base[1] + dx * wing];
-    const right: LonLat = [base[0] + (dy * wing) / kx, base[1] - dx * wing];
-    return { base, ring: [tip, left, right, tip] };
 }
 
 // Speed ramp for the flowing avalanche: pale snow (slow) -> blue -> violet -> hot pink (fast)

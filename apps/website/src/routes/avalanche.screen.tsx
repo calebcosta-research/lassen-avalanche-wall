@@ -31,6 +31,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 type ScreenSearch = { c?: number; r?: number; t?: number };
 
 const HUD_INTERVAL_MS = 33; // React HUD refresh; the map itself updates every frame
+const MAX_PIXEL_RATIO = 1.5;
 
 export const Route = createFileRoute('/avalanche/screen')({
     validateSearch: (search: Record<string, unknown>): ScreenSearch => ({
@@ -128,12 +129,15 @@ function AvalancheScreen() {
         const engine = AvalancheEngine.getInstance('screen');
         let raf = 0;
         let lastHud = 0;
+        let lastHudT = -1;
         const tick = (now: number) => {
             const frame = timeline.frameAt(frozenT ?? engine.journeyTime(timeline.total));
             const width = containerRef.current?.clientWidth || UNIT_W;
             if (mapReady) layersRef.current?.update(frame, region, width);
-            if (now - lastHud >= HUD_INTERVAL_MS) {
+            // Re-render the HUD only when journey time moved (nothing to do while paused).
+            if (now - lastHud >= HUD_INTERVAL_MS && frame.t !== lastHudT) {
                 lastHud = now;
+                lastHudT = frame.t;
                 setHudFrame(frame);
             }
             raf = requestAnimationFrame(tick);
@@ -159,6 +163,10 @@ function AvalancheScreen() {
                         mapStyle={JOURNEY_MAP_STYLE}
                         initialViewState={{ longitude: -121.505, latitude: 40.488, zoom: 13 }}
                         maxPitch={80}
+                        // Wall units are 1:1 pixels; cap high-DPI laptops so previews stay cheap.
+                        pixelRatio={Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO)}
+                        fadeDuration={0}
+                        refreshExpiredTiles={false}
                         // Extended toward the wall centre for the off-axis camera; the stage crops it.
                         style={{ position: 'absolute', ...rig.box }}
                     />

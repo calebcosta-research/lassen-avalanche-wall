@@ -107,6 +107,11 @@ export class JourneyMapLayers {
     private lastProgress = -1;
     private lastScale = -1;
     private lastAheadKey = '';
+    /** Last frame applied: identical frames (paused clock) are skipped so the map can idle. */
+    private lastFrameKey = '';
+    /** The sim texture was flagged for upload last frame; stop uploading this frame. */
+    private simUploadPending = false;
+    private readonly paintCache = new Map<string, unknown>();
     private readonly aheadStarts: Array<{ dist: number; p: LonLat }>;
 
     constructor(map: MaplibreMap, route: RouteData) {
@@ -131,7 +136,9 @@ export class JourneyMapLayers {
         this.simImage = new ImageData(cols, rows);
 
         const beforeId = this.map.getLayer('route-casing') ? 'route-casing' : undefined;
-        this.map.addSource('sim', { type: 'canvas', canvas, coordinates: corners, animate: true });
+        // animate: false matters: an animating CanvasSource counts as a permanent transition
+        // and keeps the whole map redrawing at full frame rate. We upload only on change.
+        this.map.addSource('sim', { type: 'canvas', canvas, coordinates: corners, animate: false });
         this.map.addLayer(
             {
                 id: 'sim',
@@ -184,6 +191,14 @@ export class JourneyMapLayers {
     /** Apply one journey frame for the wall region shown by this client. */
     update(frame: JourneyFrame, region: WallRegion, clientWidth: number) {
         const scale = clientWidth / region.w;
+        if (this.simUploadPending) {
+            this.map.getSource<CanvasSource>('sim')?.pause(); // uploads once, then stops
+            this.simUploadPending = false;
+        }
+        // Paused clock => same frame every tick. Skip all work so MapLibre stops rendering.
+        const key = `${frame.t.toFixed(3)}|${scale.toFixed(4)}|${region.x},${region.y}|${this.sim ? 1 : 0}`;
+        if (key === this.lastFrameKey) return;
+        this.lastFrameKey = key;
         this.applyCamera(frame, region, scale);
         if (Math.abs(scale - this.lastScale) > 1e-3) this.applyScale(scale);
         this.updateProgress(frame);
@@ -531,14 +546,22 @@ export class JourneyMapLayers {
     private updateSim(frame: JourneyFrame) {
         if (!this.sim || !this.simCanvas || !this.simImage) return;
         const visible = frame.simTime !== null && frame.simOpacity > 0.001;
-        this.map.setPaintProperty(
-            'zones',
-            'raster-opacity',
-            ZONES_OPACITY * (1 - 0.65 * frame.simFocus)
+        this.setPaint('zones', 'raster-opacity', ZONES_OPACITY * (1 - 0.65 * frame.simFocus));
+        // Hidden layers are switched off entirely rather than drawn at opacity 0.
+        this.setLayout('sim', 'visibility', visible ? 'visible' : 'none');
+        this.setLayout(
+            'release-fill',
+            'visibility',
+            frame.releaseOpacity > 0.001 ? 'visible' : 'none'
         );
-        this.map.setPaintProperty('sim', 'raster-opacity', visible ? frame.simOpacity : 0);
-        this.map.setPaintProperty('release-fill', 'fill-opacity', frame.releaseOpacity * 0.45);
-        this.map.setPaintProperty('release-line', 'line-opacity', frame.releaseOpacity);
+        this.setLayout(
+            'release-line',
+            'visibility',
+            frame.releaseOpacity > 0.001 ? 'visible' : 'none'
+        );
+        this.setPaint('sim', 'raster-opacity', visible ? frame.simOpacity : 0);
+        this.setPaint('release-fill', 'fill-opacity', frame.releaseOpacity * 0.45);
+        this.setPaint('release-line', 'line-opacity', frame.releaseOpacity);
         if (!visible || frame.simTime === null) return;
 
         const { meta, frames } = this.sim;
@@ -557,8 +580,25 @@ export class JourneyMapLayers {
         );
         const ctx = this.simCanvas.getContext('2d');
         ctx?.putImageData(this.simImage, 0, 0);
-        // CanvasSource with animate: true re-uploads on each render; nudge a repaint.
+        // play() flags a texture upload and requests a repaint; pause() next tick ends it.
         this.map.getSource<CanvasSource>('sim')?.play();
+        this.simUploadPending = true;
+    }
+
+    /** setPaintProperty only when the value really changed (each call restyles the layer). */
+    private setPaint(layer: string, prop: string, value: number) {
+        const rounded = Math.round(value * 400) / 400;
+        const k = `p|${layer}|${prop}`;
+        if (this.paintCache.get(k) === rounded || !this.map.getLayer(layer)) return;
+        this.paintCache.set(k, rounded);
+        this.map.setPaintProperty(layer, prop, rounded);
+    }
+
+    private setLayout(layer: string, prop: string, value: string) {
+        const k = `l|${layer}|${prop}`;
+        if (this.paintCache.get(k) === value || !this.map.getLayer(layer)) return;
+        this.paintCache.set(k, value);
+        this.map.setLayoutProperty(layer, prop, value);
     }
 }
 

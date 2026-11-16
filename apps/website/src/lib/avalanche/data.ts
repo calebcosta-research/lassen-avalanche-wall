@@ -124,12 +124,25 @@ export function loadRouteData(): Promise<RouteData> {
     return routePromise;
 }
 
-export function loadSimData(): Promise<SimData> {
-    simPromise ??= Promise.all([
-        fetch(`${AVALANCHE_DATA_BASE}/sim_meta.json`).then((r) => {
+let simMetaPromise: Promise<SimMeta> | null = null;
+
+/** Timing/summary metadata only (a few kB): all a control tablet needs. */
+export function loadSimMeta(): Promise<SimMeta> {
+    simMetaPromise ??= fetch(`${AVALANCHE_DATA_BASE}/sim_meta.json`)
+        .then((r) => {
             if (!r.ok) throw new Error(`sim_meta.json: HTTP ${r.status}`);
             return r.json() as Promise<SimMeta>;
-        }),
+        })
+        .catch((error: unknown) => {
+            simMetaPromise = null;
+            throw error;
+        });
+    return simMetaPromise;
+}
+
+export function loadSimData(): Promise<SimData> {
+    simPromise ??= Promise.all([
+        loadSimMeta(),
         fetch(`${AVALANCHE_DATA_BASE}/sim_frames.bin.gz`).then(async (r) => {
             if (!r.ok) throw new Error(`sim_frames.bin.gz: HTTP ${r.status}`);
             return gunzipIfNeeded(new Uint8Array(await r.arrayBuffer()));

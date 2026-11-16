@@ -1,10 +1,12 @@
 // Wall-scale HUD for the avalanche journey.
 //
 // Laid out once in wall pixels (5760 x 2160 = 3 x 2 units of 1920 x 1080). Each screen
-// renders the same tree and shows its slice through a CSS transform, so panels can span
-// bezels and every node agrees on what is where. Type sizes target ~10 m viewing distance.
+// shows its slice through a CSS transform, so panels can span bezels and every node agrees
+// on what is where. Panels outside this screen's slice are not rendered at all, so a wall
+// unit only pays for the one or two panels it actually displays. Type sizes target ~10 m
+// viewing distance.
 
-import { useMemo } from 'react';
+import { useMemo, type CSSProperties, type ReactNode } from 'react';
 
 import {
     DANGER_STYLE,
@@ -26,10 +28,25 @@ import {
     type JourneyFrame,
     type Timeline
 } from '../../lib/avalanche/timeline';
+import { AVI, FONT_BODY, FONT_DISPLAY } from './theme';
 
 const PAD = 72;
-const PANEL =
-    'absolute rounded-[28px] border-2 border-white/15 bg-[rgba(10,14,18,0.86)] text-white shadow-[0_20px_60px_rgba(0,0,0,0.45)]';
+const INNER_W = UNIT_W - 2 * PAD;
+
+type Rect = { x: number; y: number; w: number; h: number };
+
+// Slot each panel can occupy; used for culling against the screen's region.
+const SLOT: Record<'title' | 'status' | 'toasts' | 'lowerLeft' | 'banner' | 'profile', Rect> = {
+    title: { x: 0, y: 0, w: UNIT_W, h: UNIT_H },
+    status: { x: 2 * UNIT_W, y: 0, w: UNIT_W, h: UNIT_H },
+    toasts: { x: 2 * UNIT_W, y: UNIT_H, w: UNIT_W, h: UNIT_H },
+    lowerLeft: { x: 0, y: UNIT_H, w: UNIT_W, h: UNIT_H },
+    banner: { x: UNIT_W, y: 0, w: UNIT_W, h: UNIT_H / 2 },
+    profile: { x: UNIT_W, y: WALL_H - 320, w: 2 * UNIT_W, h: 320 }
+};
+
+const intersects = (a: Rect, b: WallRegion) =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
 type Props = {
     frame: JourneyFrame;
@@ -42,24 +59,174 @@ type Props = {
 export function JourneyHud({ frame, timeline, sim, region, clientWidth }: Props) {
     const scale = clientWidth / region.w;
     const inSim = frame.phase.startsWith('sim-');
+    const show = (slot: keyof typeof SLOT) => intersects(SLOT[slot], region);
     return (
         <div
-            className="pointer-events-none absolute top-0 left-0 origin-top-left font-sans"
+            className="pointer-events-none absolute top-0 left-0 origin-top-left"
             style={{
                 width: WALL_W,
                 height: WALL_H,
-                transform: `scale(${scale}) translate(${-region.x}px, ${-region.y}px)`
+                transform: `scale(${scale}) translate(${-region.x}px, ${-region.y}px)`,
+                fontFamily: FONT_BODY,
+                color: AVI.ink,
+                // HUD changes never affect layout outside itself.
+                contain: 'layout style'
             }}
         >
-            <TitlePanel route={timeline.route} />
-            <StatusPanel frame={frame} />
-            <Toasts frame={frame} />
-            {inSim && sim ? <SimPanel frame={frame} sim={sim} /> : <Legend />}
-            {frame.phase === 'sim-trigger' || frame.phase === 'sim-approach' ? (
+            {show('title') ? <TitlePanel route={timeline.route} /> : null}
+            {show('status') ? <StatusPanel frame={frame} /> : null}
+            {show('toasts') ? <Toasts frame={frame} /> : null}
+            {show('lowerLeft') ? (
+                inSim && sim ? (
+                    <SimPanel frame={frame} sim={sim} />
+                ) : (
+                    <Legend />
+                )
+            ) : null}
+            {show('banner') && (frame.phase === 'sim-trigger' || frame.phase === 'sim-approach') ? (
                 <TriggerBanner frame={frame} />
             ) : null}
-            <Profile frame={frame} timeline={timeline} />
+            {show('profile') ? <Profile frame={frame} timeline={timeline} /> : null}
         </div>
+    );
+}
+
+// ---- building blocks ------------------------------------------------------------------
+
+function Panel({
+    x,
+    y,
+    w,
+    accent = AVI.ice,
+    children,
+    style
+}: {
+    x: number;
+    y: number;
+    w: number;
+    accent?: string;
+    children: ReactNode;
+    style?: CSSProperties;
+}) {
+    return (
+        <div
+            className="absolute"
+            style={{
+                left: x,
+                top: y,
+                width: w,
+                background: AVI.base,
+                border: `2px solid ${AVI.line}`,
+                borderTop: `10px solid ${accent}`,
+                borderRadius: 6,
+                ...style
+            }}
+        >
+            <CornerTicks />
+            {children}
+        </div>
+    );
+}
+
+/** Map-frame registration ticks in the lower corners. */
+function CornerTicks() {
+    const tick: CSSProperties = {
+        position: 'absolute',
+        width: 28,
+        height: 28,
+        borderColor: AVI.lineStrong
+    };
+    return (
+        <>
+            <span
+                style={{
+                    ...tick,
+                    left: 10,
+                    bottom: 10,
+                    borderLeft: '3px solid',
+                    borderBottom: '3px solid'
+                }}
+            />
+            <span
+                style={{
+                    ...tick,
+                    right: 10,
+                    bottom: 10,
+                    borderRight: '3px solid',
+                    borderBottom: '3px solid'
+                }}
+            />
+        </>
+    );
+}
+
+function Label({
+    children,
+    color = AVI.muted,
+    size = 30
+}: {
+    children: ReactNode;
+    color?: string;
+    size?: number;
+}) {
+    return (
+        <p
+            style={{
+                fontFamily: FONT_DISPLAY,
+                fontWeight: 600,
+                fontSize: size,
+                letterSpacing: '0.16em',
+                textTransform: 'uppercase',
+                color,
+                lineHeight: 1.1
+            }}
+        >
+            {children}
+        </p>
+    );
+}
+
+const display = (size: number, weight = 700): CSSProperties => ({
+    fontFamily: FONT_DISPLAY,
+    fontWeight: weight,
+    fontSize: size,
+    lineHeight: 0.98,
+    letterSpacing: '0.01em'
+});
+
+const tabular: CSSProperties = { fontVariantNumeric: 'tabular-nums' };
+
+/** Danger level as signage: a numbered square plus the name. */
+function DangerChip({ level, size = 1 }: { level: number; size?: number }) {
+    const d = DANGER_STYLE[level];
+    return (
+        <span
+            className="inline-flex items-stretch align-middle"
+            style={{ border: `2px solid ${d.color}`, borderRadius: 4 }}
+        >
+            <span
+                className="flex items-center justify-center"
+                style={{
+                    ...display(40 * size),
+                    width: 52 * size,
+                    background: d.color,
+                    color: d.ink
+                }}
+            >
+                {level}
+            </span>
+            <span
+                className="flex items-center"
+                style={{
+                    ...display(36 * size, 600),
+                    padding: `0 ${14 * size}px`,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.06em'
+                }}
+            >
+                {d.label}
+            </span>
+        </span>
     );
 }
 
@@ -73,43 +240,41 @@ function TitlePanel({ route }: { route: RouteData }) {
         ['Below treeline', c.danger.below_treeline]
     ];
     return (
-        <div
-            className={PANEL}
-            style={{ left: PAD, top: PAD, width: UNIT_W - 2 * PAD, padding: 56 }}
-        >
-            <p className="text-[34px] font-semibold tracking-[0.3em] text-white/60 uppercase">
-                Lassen Volcanic NP · Test route
-            </p>
-            <h1 className="mt-3 text-[76px] leading-[1.05] font-bold">Avalanche terrain check</h1>
-            <p className="mt-6 text-[40px] font-semibold">
-                {c.name} <span className="font-normal text-white/60">· {c.date}</span>
-            </p>
-            <div className="mt-6 flex gap-5">
+        <Panel x={PAD} y={PAD} w={INNER_W} style={{ padding: '44px 56px 56px' }}>
+            <Label color={AVI.ice}>Lassen Volcanic NP · Test route 01</Label>
+            <h1 style={{ ...display(104), marginTop: 10, textTransform: 'uppercase' }}>
+                Avalanche terrain check
+            </h1>
+            <div className="mt-6 flex items-baseline gap-5" style={{ fontSize: 38 }}>
+                <span style={{ fontWeight: 600 }}>{c.name}</span>
+                <span style={{ color: AVI.muted }}>{c.date}</span>
+            </div>
+            <div
+                className="mt-8 grid grid-cols-3 gap-5"
+                style={{ borderTop: `2px solid ${AVI.line}`, paddingTop: 26 }}
+            >
                 {bands.map(([label, level]) => (
-                    <div
-                        key={label}
-                        className="flex-1 rounded-2xl px-6 py-4"
-                        style={{
-                            background: DANGER_STYLE[level].color,
-                            color: DANGER_STYLE[level].ink
-                        }}
-                    >
-                        <div className="text-[28px] font-semibold opacity-80">{label}</div>
-                        <div className="text-[44px] font-bold">{DANGER_STYLE[level].label}</div>
+                    <div key={label}>
+                        <Label size={26}>{label}</Label>
+                        <div className="mt-3">
+                            <DangerChip level={level} size={0.95} />
+                        </div>
                     </div>
                 ))}
             </div>
-            <p className="mt-6 text-[34px] leading-snug text-white/85">{c.summary}</p>
-        </div>
+            <p className="mt-8" style={{ fontSize: 33, lineHeight: 1.35, color: '#cfdbe5' }}>
+                {c.summary}
+            </p>
+        </Panel>
     );
 }
 
 // ---- top-right unit: live status of the traveller -------------------------------------
 
 const LEG_LABEL = {
-    drive: 'Driving Lassen Park Hwy',
-    climb: 'Climbing Lassen Peak Trail',
-    descend: 'Descending Lassen Peak Trail'
+    drive: 'Driving · Lassen Park Hwy',
+    climb: 'Climbing · Lassen Peak Trail',
+    descend: 'Descending · Lassen Peak Trail'
 };
 
 function StatusPanel({ frame }: { frame: JourneyFrame }) {
@@ -117,91 +282,145 @@ function StatusPanel({ frame }: { frame: JourneyFrame }) {
     const inSim = frame.phase.startsWith('sim-');
     // At the summit the card describes the avalanche scenario rather than the summit cell.
     const style = inSim
-        ? { color: '#c62828', ink: '#ffffff', label: 'Avalanche scenario' }
+        ? { color: AVI.alert, ink: '#ffffff', label: 'Avalanche scenario' }
         : ZONE_STYLE[frame.zone];
     return (
-        <div
-            className={PANEL}
-            style={{
-                left: 2 * UNIT_W + PAD,
-                top: PAD,
-                width: UNIT_W - 2 * PAD,
-                overflow: 'hidden'
-            }}
+        <Panel
+            x={2 * UNIT_W + PAD}
+            y={PAD}
+            w={INNER_W}
+            accent={style.color}
+            style={{ overflow: 'hidden' }}
         >
-            <div
-                className="px-14 pt-12 pb-10"
-                style={{ background: style.color, color: style.ink }}
-            >
-                <p className="text-[32px] font-semibold tracking-[0.25em] uppercase opacity-75">
-                    {inSim ? 'Paused at the summit' : 'You are in'}
-                </p>
-                <p className="mt-2 text-[84px] leading-[1.02] font-bold">{style.label}</p>
+            <div style={{ padding: '40px 56px 44px', borderBottom: `2px solid ${AVI.line}` }}>
+                <Label>{inSim ? 'Paused at the summit' : 'You are in'}</Label>
+                <div className="mt-4 flex items-center gap-8">
+                    <span
+                        className="shrink-0"
+                        style={{
+                            width: 34,
+                            alignSelf: 'stretch',
+                            background: style.color,
+                            borderRadius: 3
+                        }}
+                    />
+                    <p style={{ ...display(104), textTransform: 'uppercase' }}>{style.label}</p>
+                </div>
             </div>
-            <div className="space-y-5 px-14 py-10 text-[40px] leading-snug">
-                <p className="text-white/70">
-                    {inSim ? 'Lassen Peak summit' : LEG_LABEL[frame.legKind]} ·{' '}
-                    {(frame.dist / 1000).toFixed(1)} km · {Math.round(frame.elev).toLocaleString()}{' '}
-                    m
-                </p>
+            <div className="grid grid-cols-3" style={{ borderBottom: `2px solid ${AVI.line}` }}>
+                <Readout label="Route" value={`${(frame.dist / 1000).toFixed(1)}`} unit="km" />
+                <Readout
+                    label="Elevation"
+                    value={Math.round(frame.elev).toLocaleString()}
+                    unit="m"
+                    divider
+                />
+                <Readout
+                    label="Mode"
+                    value={inSim ? 'Summit' : LEG_LABEL[frame.legKind].split(' · ')[0]}
+                    divider
+                />
+            </div>
+            <div
+                className="space-y-5"
+                style={{ padding: '36px 56px 56px', fontSize: 38, lineHeight: 1.3 }}
+            >
                 {inSim ? (
                     <p>
                         Storm slab released on the <b>NE face</b> below the summit. Watch where it
                         runs and stops.
                     </p>
                 ) : ev ? (
-                    <EventDetail event={ev} large />
+                    <EventDetail event={ev} />
                 ) : null}
             </div>
+        </Panel>
+    );
+}
+
+function Readout({
+    label,
+    value,
+    unit,
+    divider
+}: {
+    label: string;
+    value: string;
+    unit?: string;
+    divider?: boolean;
+}) {
+    return (
+        <div
+            style={{
+                padding: '24px 40px 26px 56px',
+                borderLeft: divider ? `2px solid ${AVI.line}` : undefined
+            }}
+        >
+            <Label size={24}>{label}</Label>
+            <p className="mt-2" style={{ ...display(60), ...tabular }}>
+                {value}
+                {unit ? (
+                    <span style={{ ...display(34, 500), color: AVI.muted, marginLeft: 8 }}>
+                        {unit}
+                    </span>
+                ) : null}
+            </p>
         </div>
     );
 }
 
-function EventDetail({ event, large = false }: { event: RouteEvent; large?: boolean }) {
-    const danger = DANGER_STYLE[event.danger_level];
-    const size = large ? 'text-[40px]' : 'text-[34px]';
+function EventDetail({ event }: { event: RouteEvent }) {
     return (
-        <div className={`space-y-3 ${size} leading-snug`}>
+        <>
             {event.start_zone ? (
                 <p>
                     Start zone{' '}
-                    <b>
+                    <b style={{ color: AVI.ice }}>
                         {event.start_zone.distance_m} m {event.start_zone.compass}
                     </b>
                     {event.slope ? (
-                        <span className="text-white/70"> · {event.slope} slope</span>
+                        <span style={{ color: AVI.muted }}> · {event.slope} slope</span>
                     ) : null}
                 </p>
             ) : event.slope && event.zone === 3 ? (
                 <p>
-                    On a <b>{event.slope}</b> slope
+                    On a <b style={{ color: AVI.ice }}>{event.slope}</b> slope
                 </p>
             ) : null}
             {event.zone > 0 && event.problems.length > 0 && event.active ? (
-                <p>
-                    <span className="mr-3 rounded-lg bg-[#f58220] px-3 py-1 font-bold text-black">
-                        ⚠
+                <p className="flex items-start gap-4">
+                    <span
+                        style={{
+                            ...display(30),
+                            background: AVI.warn,
+                            color: '#140a00',
+                            padding: '4px 12px',
+                            borderRadius: 3,
+                            letterSpacing: '0.1em'
+                        }}
+                    >
+                        PROBLEM
                     </span>
-                    {event.problems
-                        .map((p) => `${p.type} (${p.likelihood}, size ${p.size[0]}–${p.size[1]})`)
-                        .join(' · ')}
+                    <span>
+                        {event.problems
+                            .map(
+                                (p) =>
+                                    `${p.type} · ${p.likelihood} · size ${p.size[0]}–${p.size[1]}`
+                            )
+                            .join('  /  ')}
+                    </span>
                 </p>
             ) : event.zone > 0 ? (
-                <p className="text-white/65">
+                <p style={{ color: AVI.muted }}>
                     No forecast problem matches this slope today. Still avalanche terrain.
                 </p>
             ) : null}
-            <p>
-                Danger here:{' '}
-                <span
-                    className="rounded-lg px-3 py-0.5 font-bold"
-                    style={{ background: danger.color, color: danger.ink }}
-                >
-                    {danger.label}
-                </span>{' '}
-                <span className="text-white/60">({event.band})</span>
+            <p className="flex items-center gap-5">
+                <span style={{ color: AVI.muted }}>Danger here</span>
+                <DangerChip level={event.danger_level} size={0.85} />
+                <span style={{ color: AVI.dim }}>{event.band}</span>
             </p>
-        </div>
+        </>
     );
 }
 
@@ -210,44 +429,56 @@ function EventDetail({ event, large = false }: { event: RouteEvent; large?: bool
 function Toasts({ frame }: { frame: JourneyFrame }) {
     return (
         <div
-            className="absolute flex flex-col gap-8"
-            style={{ left: 2 * UNIT_W + PAD, top: UNIT_H + PAD / 2, width: UNIT_W - 2 * PAD }}
+            className="absolute flex flex-col gap-7"
+            style={{ left: 2 * UNIT_W + PAD, top: UNIT_H + PAD / 2, width: INNER_W }}
         >
             {frame.toasts.map(({ event, index, ageS }) => {
                 const style = ZONE_STYLE[event.zone];
                 const enter = smoothstep(0, 0.8, ageS);
                 const leave = 1 - smoothstep(TOAST_LIFETIME_S - 1.5, TOAST_LIFETIME_S, ageS);
+                const leaving = event.zone === 0;
                 return (
                     <div
                         key={index}
-                        className="flex overflow-hidden rounded-[24px] border-2 border-white/15 bg-[rgba(10,14,18,0.9)] text-white"
+                        className="relative flex overflow-hidden"
                         style={{
                             opacity: enter * leave,
-                            transform: `translateX(${(1 - enter) * 160}px)`
+                            transform: `translateX(${(1 - enter) * 160}px)`,
+                            background: AVI.base,
+                            border: `2px solid ${AVI.line}`,
+                            borderRadius: 6
                         }}
                     >
-                        <div className="w-8 shrink-0" style={{ background: style.color }} />
-                        <div className="px-10 py-7">
-                            <p className="text-[30px] font-semibold tracking-[0.2em] text-white/60 uppercase">
-                                {event.zone === 0 ? 'Leaving avalanche terrain' : 'Entering'} ·{' '}
-                                {(event.dist_m / 1000).toFixed(1)} km
-                            </p>
-                            <p
-                                className="mt-1 text-[56px] leading-tight font-bold"
-                                style={{ color: event.zone === 0 ? '#9be29f' : style.color }}
-                            >
+                        <div
+                            className="flex shrink-0 items-center justify-center"
+                            style={{ width: 132, background: style.color, color: style.ink }}
+                        >
+                            <span style={display(64)}>
+                                {leaving ? '✓' : event.zone === 3 ? '▲' : '◆'}
+                            </span>
+                        </div>
+                        <div style={{ padding: '22px 36px 26px' }}>
+                            <Label size={26}>
+                                {leaving ? 'Leaving avalanche terrain' : 'Entering'} · km{' '}
+                                {(event.dist_m / 1000).toFixed(1)}
+                            </Label>
+                            <p style={{ ...display(64), marginTop: 6, textTransform: 'uppercase' }}>
                                 {event.label}
                             </p>
                             {event.zone > 0 ? (
-                                <p className="mt-2 text-[34px] text-white/85">
+                                <p className="mt-2" style={{ fontSize: 32, color: '#cfdbe5' }}>
                                     {event.start_zone
                                         ? `Start zone ${event.start_zone.distance_m} m ${event.start_zone.compass}`
                                         : event.slope
                                           ? `${event.slope} slope`
                                           : ''}
-                                    {event.active && event.problems.length
-                                        ? ` · ${event.problems.map((p) => p.type).join(' + ')} ${event.problems[0].likelihood}`
-                                        : ''}
+                                    {event.active && event.problems.length ? (
+                                        <span style={{ color: AVI.warn }}>
+                                            {' '}
+                                            · {event.problems.map((p) => p.type).join(' + ')}{' '}
+                                            {event.problems[0].likelihood}
+                                        </span>
+                                    ) : null}
                                 </p>
                             ) : null}
                         </div>
@@ -261,45 +492,62 @@ function Toasts({ frame }: { frame: JourneyFrame }) {
 // ---- left column, lower unit: legend while travelling, simulation stats at the peak ----
 
 function Legend() {
-    const rows: Array<[string, React.ReactNode]> = [
-        [ZONE_STYLE[3].label + ' (start zones)', <Swatch key="3" color={ZONE_STYLE[3].color} />],
+    const rows: Array<[string, ReactNode]> = [
+        [ZONE_STYLE[3].label + ' · start zones', <Swatch key="3" color={ZONE_STYLE[3].color} />],
         [ZONE_STYLE[2].label, <Swatch key="2" color={ZONE_STYLE[2].color} />],
         [ZONE_STYLE[1].label, <Swatch key="1" color={ZONE_STYLE[1].color} />],
         [
             'Trigger zone feeding your position',
             <span
                 key="t"
-                className="inline-block h-10 w-10 rounded-full border-4 border-white"
-                style={{ background: ZONE_STYLE[3].color }}
+                className="inline-block rounded-full"
+                style={{
+                    width: 40,
+                    height: 40,
+                    border: '5px solid #fff',
+                    background: ZONE_STYLE[3].color
+                }}
             />
         ],
         [
             'Avalanche path toward you',
-            <span key="a" className="inline-block h-3 w-16 rounded bg-[#fb8c00]" />
+            <span
+                key="a"
+                className="inline-block"
+                style={{ width: 64, height: 12, background: '#fb8c00' }}
+            />
         ]
     ];
     return (
-        <div
-            className={PANEL}
-            style={{ left: PAD, top: UNIT_H + PAD / 2, width: UNIT_W - 2 * PAD, padding: 48 }}
-        >
-            <p className="text-[32px] font-semibold tracking-[0.25em] text-white/60 uppercase">
-                Map key · AutoATES 10 m
-            </p>
-            <div className="mt-6 space-y-5">
-                {rows.map(([label, icon]) => (
-                    <div key={label} className="flex items-center gap-6 text-[38px]">
+        <Panel x={PAD} y={UNIT_H + PAD / 2} w={INNER_W} style={{ padding: '40px 56px 52px' }}>
+            <Label color={AVI.ice}>Map key · AutoATES 10 m</Label>
+            <div className="mt-6">
+                {rows.map(([label, icon], i) => (
+                    <div
+                        key={label}
+                        className="flex items-center gap-7"
+                        style={{
+                            fontSize: 38,
+                            padding: '14px 0',
+                            borderTop: i ? `1px solid ${AVI.line}` : undefined
+                        }}
+                    >
                         <span className="flex w-16 justify-center">{icon}</span>
                         {label}
                     </div>
                 ))}
             </div>
-        </div>
+        </Panel>
     );
 }
 
 function Swatch({ color }: { color: string }) {
-    return <span className="inline-block h-10 w-14 rounded-md" style={{ background: color }} />;
+    return (
+        <span
+            className="inline-block"
+            style={{ width: 60, height: 40, background: color, borderRadius: 3 }}
+        />
+    );
 }
 
 function TriggerBanner({ frame }: { frame: JourneyFrame }) {
@@ -309,18 +557,26 @@ function TriggerBanner({ frame }: { frame: JourneyFrame }) {
             : 1 - smoothstep(0.8, 1, frame.phaseProgress);
     return (
         <div
-            className="absolute flex items-center justify-center"
+            className="absolute flex justify-center"
             style={{ left: UNIT_W, top: PAD, width: UNIT_W, opacity: a }}
         >
-            <div className="rounded-[28px] border-4 border-[#ff5252] bg-[rgba(10,14,18,0.9)] px-16 py-10 text-center text-white">
-                <p className="text-[34px] font-semibold tracking-[0.3em] text-[#ff8a80] uppercase">
-                    What if…
+            <Panel
+                x={0}
+                y={0}
+                w={1400}
+                accent={AVI.alert}
+                style={{ position: 'relative', padding: '36px 60px 48px', textAlign: 'center' }}
+            >
+                <Label color={AVI.alert} size={34}>
+                    Scenario · what if
+                </Label>
+                <p style={{ ...display(110), marginTop: 10, textTransform: 'uppercase' }}>
+                    A storm slab releases
                 </p>
-                <p className="mt-2 text-[80px] leading-none font-bold">A storm slab releases</p>
-                <p className="mt-4 text-[38px] text-white/80">
+                <p className="mt-4" style={{ fontSize: 38, color: '#cfdbe5' }}>
                     Lassen Peak NE face · 0.5 m deep · 5.5 ha
                 </p>
-            </div>
+            </Panel>
         </div>
     );
 }
@@ -333,94 +589,116 @@ function SimPanel({ frame, sim }: { frame: JourneyFrame; sim: SimMeta }) {
     const s = sim.summary;
     const settled = frame.phase === 'sim-settle' || frame.phase === 'sim-return';
     const speedup = sim.times_s[sim.times_s.length - 1] / 34;
+    const n = sim.ke_MJ.length - 1;
     const spark = sim.ke_MJ
-        .map((v, i) => `${(i / (sim.ke_MJ.length - 1)) * 1000},${200 - (v / peakKe) * 190}`)
+        .map((v, i) => `${(i / n) * 1000},${200 - (v / peakKe) * 190}`)
+        .join(' ');
+    const sparkDone = sim.ke_MJ
+        .slice(0, k + 1)
+        .map((v, i) => `${(i / n) * 1000},${200 - (v / peakKe) * 190}`)
         .join(' ');
     return (
-        <div
-            className={PANEL}
-            style={{ left: PAD, top: UNIT_H + PAD / 2, width: UNIT_W - 2 * PAD, padding: 48 }}
+        <Panel
+            x={PAD}
+            y={UNIT_H + PAD / 2}
+            w={INNER_W}
+            accent={AVI.alert}
+            style={{ padding: '40px 56px 48px' }}
         >
-            <p className="text-[32px] font-semibold tracking-[0.25em] text-[#ff8a80] uppercase">
-                Avalanche simulation · storm slab
-            </p>
-            <div className="mt-4 flex items-end gap-10">
-                <p className="text-[120px] leading-none font-bold tabular-nums">{formatClock(t)}</p>
-                <p className="pb-3 text-[36px] text-white/70">
-                    {frame.phase === 'sim-flow'
-                        ? `simulated time · ${speedup.toFixed(0)}× speed`
-                        : settled
-                          ? 'flow has run out'
-                          : 'release'}
-                </p>
-            </div>
-            <div className="mt-6 flex items-center gap-8">
-                <svg viewBox="0 0 1000 210" className="h-[150px] flex-1" preserveAspectRatio="none">
-                    <polyline
-                        points={spark}
-                        fill="none"
-                        stroke="rgba(255,255,255,0.25)"
-                        strokeWidth="6"
-                    />
-                    <line
-                        x1={(k / (sim.ke_MJ.length - 1)) * 1000}
-                        x2={(k / (sim.ke_MJ.length - 1)) * 1000}
-                        y1="0"
-                        y2="210"
-                        stroke="#ff4d8d"
-                        strokeWidth="8"
-                    />
-                </svg>
-                <div className="w-[420px] text-[36px]">
-                    <div className="text-white/60">Kinetic energy</div>
-                    <div className="text-[64px] font-bold tabular-nums">{Math.round(ke)} MJ</div>
+            <Label color={AVI.alert}>Avalanche simulation · storm slab</Label>
+            <div className="mt-3 flex items-end gap-10">
+                <p style={{ ...display(170), ...tabular }}>{formatClock(t)}</p>
+                <div className="pb-4">
+                    <Label size={28}>
+                        {frame.phase === 'sim-flow'
+                            ? `Simulated time · ${speedup.toFixed(0)}× speed`
+                            : settled
+                              ? 'Flow has run out'
+                              : 'Release'}
+                    </Label>
                 </div>
             </div>
             <div
-                className="mt-8 grid grid-cols-3 gap-x-8 gap-y-6 text-[34px]"
-                style={{ opacity: 0.55 + 0.45 * (settled ? 1 : 0) }}
+                className="mt-6 flex items-center gap-10"
+                style={{ borderTop: `2px solid ${AVI.line}`, paddingTop: 24 }}
             >
-                <Stat label="Max speed" value={`${s.max_speed_ms} m/s`} />
-                <Stat label="Vertical drop" value={`${Math.round(s.vertical_drop_m)} m`} />
-                <Stat label="Runout" value={`${(s.runout_horizontal_m / 1000).toFixed(2)} km`} />
-                <Stat label="Affected area" value={`${s.affected_area_ha.toFixed(0)} ha`} />
-                <Stat label="Max pressure" value={`${Math.round(s.max_pressure_kPa)} kPa`} />
-                <Stat label="Deposit depth" value={`${s.max_deposit_depth_m.toFixed(1)} m`} />
+                <svg viewBox="0 0 1000 210" className="h-[150px] flex-1" preserveAspectRatio="none">
+                    <polyline points={spark} fill="none" stroke={AVI.line} strokeWidth="6" />
+                    <polyline points={sparkDone} fill="none" stroke={AVI.ice} strokeWidth="7" />
+                    <line
+                        x1={(k / n) * 1000}
+                        x2={(k / n) * 1000}
+                        y1="0"
+                        y2="210"
+                        stroke={AVI.alert}
+                        strokeWidth="6"
+                    />
+                </svg>
+                <div className="w-[400px]">
+                    <Label size={26}>Kinetic energy</Label>
+                    <p className="mt-2" style={{ ...display(84), ...tabular }}>
+                        {Math.round(ke)}
+                        <span style={{ ...display(40, 500), color: AVI.muted, marginLeft: 10 }}>
+                            MJ
+                        </span>
+                    </p>
+                </div>
             </div>
-            <div className="mt-8 flex items-center gap-5 text-[30px] text-white/70">
-                <span>Flow speed</span>
+            <div
+                className="mt-6 grid grid-cols-3"
+                style={{
+                    borderTop: `2px solid ${AVI.line}`,
+                    opacity: settled ? 1 : 0.6,
+                    transition: 'opacity 600ms'
+                }}
+            >
+                <Stat label="Max speed" value={`${s.max_speed_ms}`} unit="m/s" />
+                <Stat label="Vertical drop" value={`${Math.round(s.vertical_drop_m)}`} unit="m" />
+                <Stat label="Runout" value={(s.runout_horizontal_m / 1000).toFixed(2)} unit="km" />
+                <Stat label="Affected area" value={s.affected_area_ha.toFixed(0)} unit="ha" />
+                <Stat label="Max pressure" value={`${Math.round(s.max_pressure_kPa)}`} unit="kPa" />
+                <Stat label="Deposit depth" value={s.max_deposit_depth_m.toFixed(1)} unit="m" />
+            </div>
+            <div className="mt-6 flex items-center gap-5">
+                <Label size={24}>Flow speed</Label>
                 <span
-                    className="h-6 flex-1 rounded"
+                    className="h-5 flex-1"
                     style={{
+                        borderRadius: 2,
                         background:
                             'linear-gradient(90deg, rgb(226,240,255), rgb(140,200,255), rgb(70,130,255), rgb(168,85,247), rgb(255,77,141))'
                     }}
                 />
-                <span>0 → 22 m/s</span>
+                <Label size={24}>0 – 22 m/s</Label>
             </div>
-            <p className="mt-6 text-[26px] text-white/50">
+            <p className="mt-5" style={{ fontSize: 25, color: AVI.dim }}>
                 Voellmy-Salm depth-averaged flow (μ {sim.inputs.mu}, ξ {sim.inputs.xi} m/s²), 10 m
                 DEM. A planning scenario, not a forecast.
+            </p>
+        </Panel>
+    );
+}
+
+function Stat({ label, value, unit }: { label: string; value: string; unit: string }) {
+    return (
+        <div style={{ padding: '18px 0 4px' }}>
+            <Label size={24}>{label}</Label>
+            <p className="mt-1" style={{ ...display(60), ...tabular }}>
+                {value}
+                <span style={{ ...display(30, 500), color: AVI.muted, marginLeft: 6 }}>{unit}</span>
             </p>
         </div>
     );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-    return (
-        <div>
-            <div className="text-white/60">{label}</div>
-            <div className="text-[52px] font-bold">{value}</div>
-        </div>
-    );
-}
+// ---- bottom strip across the wall: elevation profile coloured by zone -----------------
 
-// ---- bottom strip across the whole wall: elevation profile coloured by zone ------------
-
-const PROFILE_H = 230;
-const PROFILE_TOP = WALL_H - PROFILE_H - 40;
+const PROFILE_H = 240;
+const PROFILE_TOP = WALL_H - PROFILE_H - 44;
 const PROFILE_LEFT = UNIT_W + PAD; // starts after the left column's panel
 const PROFILE_W = WALL_W - PROFILE_LEFT - PAD;
+const PLOT_TOP = 54;
+const PLOT_BOTTOM = PROFILE_H - 48;
 
 function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline }) {
     const route = timeline.route;
@@ -429,7 +707,7 @@ function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline 
         const lo = Math.min(...elev) - 50;
         const hi = Math.max(...elev) + 50;
         const x = (d: number) => (d / route.total_m) * PROFILE_W;
-        const y = (e: number) => PROFILE_H - ((e - lo) / (hi - lo)) * (PROFILE_H - 20);
+        const y = (e: number) => PLOT_BOTTOM - ((e - lo) / (hi - lo)) * (PLOT_BOTTOM - PLOT_TOP);
         const step = Math.max(1, Math.floor(dist.length / 800));
         let line = '';
         for (let i = 0; i < dist.length; i += step)
@@ -440,61 +718,104 @@ function Profile({ frame, timeline }: { frame: JourneyFrame; timeline: Timeline 
             color: ZONE_STYLE[e.zone].color,
             zone: e.zone
         }));
-        return { line, runs, x, y };
+        const ticks: number[] = [];
+        for (let km = 0; km * 1000 <= route.total_m; km += 2.5) ticks.push(km);
+        return { line, runs, x, y, ticks };
     }, [route]);
     const mx = geometry.x(frame.dist);
     const my = geometry.y(frame.elev);
     return (
         <div
             className="absolute"
-            style={{ left: PROFILE_LEFT, top: PROFILE_TOP, width: PROFILE_W, height: PROFILE_H }}
+            style={{
+                left: PROFILE_LEFT,
+                top: PROFILE_TOP,
+                width: PROFILE_W,
+                height: PROFILE_H,
+                background: AVI.base,
+                border: `2px solid ${AVI.line}`,
+                borderRadius: 6
+            }}
         >
-            <svg width={PROFILE_W} height={PROFILE_H} className="overflow-visible">
-                <rect
-                    x={0}
-                    y={0}
-                    width={PROFILE_W}
-                    height={PROFILE_H}
-                    rx={20}
-                    fill="rgba(10,14,18,0.7)"
-                />
+            <svg
+                width={PROFILE_W}
+                height={PROFILE_H}
+                className="overflow-visible"
+                style={{ fontFamily: FONT_DISPLAY }}
+            >
+                <text
+                    x={24}
+                    y={38}
+                    fill={AVI.muted}
+                    fontSize={26}
+                    fontWeight={600}
+                    letterSpacing="0.16em"
+                >
+                    ROUTE PROFILE · AVALANCHE TERRAIN ALONG THE WAY
+                </text>
+                <rect x={0} y={0} width={mx} height={PROFILE_H} fill="rgba(159,216,255,0.06)" />
+                {geometry.ticks.map((km) => (
+                    <g key={km}>
+                        <line
+                            x1={geometry.x(km * 1000)}
+                            x2={geometry.x(km * 1000)}
+                            y1={PLOT_TOP}
+                            y2={PLOT_BOTTOM}
+                            stroke={AVI.line}
+                            strokeWidth={2}
+                        />
+                        <text
+                            x={geometry.x(km * 1000) + 8}
+                            y={PROFILE_H - 14}
+                            fill={AVI.dim}
+                            fontSize={24}
+                            fontWeight={600}
+                        >
+                            {km} KM
+                        </text>
+                    </g>
+                ))}
                 {geometry.runs.map((r, i) =>
                     r.zone > 0 ? (
                         <rect
                             key={i}
                             x={r.x0}
-                            y={PROFILE_H - 22}
+                            y={PLOT_BOTTOM + 2}
                             width={Math.max(2, r.w)}
-                            height={22}
+                            height={14}
                             fill={r.color}
                         />
                     ) : null
                 )}
-                <rect x={0} y={0} width={mx} height={PROFILE_H} fill="rgba(255,255,255,0.06)" />
-                <polyline
-                    points={geometry.line}
-                    fill="none"
-                    stroke="rgba(255,255,255,0.8)"
-                    strokeWidth={5}
+                <polyline points={geometry.line} fill="none" stroke={AVI.ice} strokeWidth={5} />
+                <line
+                    x1={mx}
+                    x2={mx}
+                    y1={PLOT_TOP - 10}
+                    y2={PLOT_BOTTOM + 16}
+                    stroke={AVI.ink}
+                    strokeWidth={4}
                 />
-                <line x1={mx} x2={mx} y1={0} y2={PROFILE_H} stroke="#ffffff" strokeWidth={4} />
-                <circle
-                    cx={mx}
-                    cy={my}
-                    r={16}
+                <rect
+                    x={mx - 15}
+                    y={my - 15}
+                    width={30}
+                    height={30}
                     fill={ZONE_STYLE[frame.zone].color}
                     stroke="#fff"
                     strokeWidth={5}
+                    transform={`rotate(45 ${mx} ${my})`}
                 />
                 <text
                     x={geometry.x(route.summit.dist_m)}
                     y={geometry.y(route.summit.elev_m) - 22}
-                    fill="#ffffff"
+                    fill={AVI.ink}
                     fontSize={34}
                     fontWeight={700}
                     textAnchor="middle"
+                    letterSpacing="0.06em"
                 >
-                    Lassen Peak {route.summit.elev_m.toLocaleString()} m
+                    LASSEN PEAK {route.summit.elev_m.toLocaleString()} M
                 </text>
             </svg>
         </div>

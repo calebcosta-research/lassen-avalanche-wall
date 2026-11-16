@@ -41,7 +41,9 @@ export const Route = createFileRoute('/avalanche/screen')({
         c: parseCoord(search.c, WALL_COLS),
         r: parseCoord(search.r, WALL_ROWS),
         t: parseTime(search.t),
-        prewarm: search.prewarm === '0' || search.prewarm === 0 ? false : undefined
+        // The router writes the validated value back to the URL (as false) and validates
+        // again, so every spelling of "off" has to round-trip.
+        prewarm: [0, '0', false, 'false'].includes(search.prewarm as never) ? false : undefined
     }),
     component: AvalancheScreen
 });

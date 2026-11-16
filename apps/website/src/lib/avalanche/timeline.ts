@@ -33,6 +33,8 @@ const TRAVEL_PITCH = 45;
 const SIM_PITCH = 64;
 /** Camera centre is a distance-window average of the route, which calms switchbacks. */
 const CAMERA_SMOOTH_M = 700;
+/** Half-window of each of the two smoothing passes for the camera height. */
+const ELEV_SMOOTH_M = 1200;
 
 export const TOAST_LIFETIME_S = 9;
 export const TOAST_MAX = 3;
@@ -175,31 +177,33 @@ export function buildTimeline(
     // --- camera centre: distance-window average of the route (precomputed per sample) ---
     const camLon = new Float64Array(n);
     const camLat = new Float64Array(n);
-    const camElev = new Float64Array(n);
     {
         let a = 0;
         let b = 0;
         let sumLon = 0;
         let sumLat = 0;
-        let sumElev = 0;
         for (let i = 0; i < n; i++) {
             while (b < n && dist[b] <= dist[i] + CAMERA_SMOOTH_M) {
                 sumLon += lon[b];
                 sumLat += lat[b];
-                sumElev += elev[b];
                 b++;
             }
             while (dist[a] < dist[i] - CAMERA_SMOOTH_M) {
                 sumLon -= lon[a];
                 sumLat -= lat[a];
-                sumElev -= elev[a];
                 a++;
             }
             camLon[i] = sumLon / (b - a);
             camLat[i] = sumLat / (b - a);
-            camElev[i] = sumElev / (b - a);
         }
     }
+    // Camera height (the pivot the 3D camera orbits) follows the ground much more loosely
+    // than the camera position, so switchbacks and small rises don't make the view bob.
+    const camElev = boxSmooth(
+        boxSmooth(Float64Array.from(elev), dist, ELEV_SMOOTH_M),
+        dist,
+        ELEV_SMOOTH_M
+    );
 
     // Events in the descent are muted: the same slopes were announced on the way up.
     const descend = route.legs.find((leg) => leg.kind === 'descend');
@@ -419,6 +423,21 @@ export function buildTimeline(
 }
 
 // ---- helpers --------------------------------------------------------------------------
+
+/** Moving average over +/- halfWindow metres of route distance. */
+function boxSmooth(values: Float64Array, dist: number[], halfWindow: number) {
+    const n = values.length;
+    const out = new Float64Array(n);
+    let a = 0;
+    let b = 0;
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        while (b < n && dist[b] <= dist[i] + halfWindow) sum += values[b++];
+        while (dist[a] < dist[i] - halfWindow) sum -= values[a++];
+        out[i] = sum / (b - a);
+    }
+    return out;
+}
 
 function legAt(legs: RouteLeg[], d: number) {
     return legs.find((leg) => d < leg.to_m) ?? legs[legs.length - 1];

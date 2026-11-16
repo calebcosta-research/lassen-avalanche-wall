@@ -1,19 +1,13 @@
 // Imperative MapLibre layers for the avalanche journey.
 //
-// Everything renders with MapLibre primitives (no deck.gl canvas), so one renderer path
-// works both top-level and inside the wall's iframes (BEST_PRACTICES.md section 7), and
-// raster/vector layers line up on the same basemap. Per-frame work is limited to
-// camera moves, tiny GeoJSON updates and one small canvas upload for the avalanche.
+// MapLibre draws the 3D terrain and the static draped layers (basemap, hillshade, zones,
+// dashed route) plus the avalanche canvas. Everything that changes while playing lives in
+// MarkerOverlay, because with 3D terrain any change to a MapLibre layer rebuilds the cached
+// terrain textures. Works the same top-level and inside the wall's iframes.
 
-import type {
-    CanvasSource,
-    ExpressionSpecification,
-    GeoJSONSource,
-    LayerSpecification,
-    Map as MaplibreMap
-} from 'maplibre-gl';
+import type { CanvasSource, LayerSpecification, Map as MaplibreMap } from 'maplibre-gl';
 
-import { AVALANCHE_DATA_BASE, ZONE_STYLE, type LonLat, type RouteData, type SimData } from './data';
+import { AVALANCHE_DATA_BASE, type RouteData, type SimData } from './data';
 import { MarkerOverlay } from './marker-overlay';
 import { clamp, smoothstep, WALL_H, WALL_W, type JourneyFrame, type Timeline } from './timeline';
 
@@ -27,6 +21,8 @@ const PREWARM_STEP_S = 5;
 /** Longest wait for one stop's tiles; slow networks move on rather than stall. */
 const PREWARM_STOP_TIMEOUT_MS = 3000;
 const TERRAIN_EXAGGERATION = 1.3;
+/** Terrain mesh DEM zoom (~30 m cells at Lassen). The hillshade still uses z14 detail. */
+const TERRAIN_MAX_ZOOM = 12;
 
 /**
  * Wall camera distance in wall pixels: MapLibre's default 36.87 degree vertical field of view
@@ -75,9 +71,6 @@ export function wallCameraRig(region: WallRegion, scale: number): CameraRig {
     };
 }
 
-/** Start zones feeding the route within this distance ahead are previewed. */
-const AHEAD_M = 1600;
-
 /** Which part of the 5760 x 2160 wall this client shows, and at what size. */
 export type WallRegion = { x: number; y: number; w: number; h: number };
 
@@ -87,13 +80,25 @@ const fc = (features: Feature[]): GeoJSON.FeatureCollection => ({
     features
 });
 
-// Widths/radii in wall pixels; scaled to the client's real size on resize.
+// Widths in wall pixels; scaled to the client's real size on resize.
 const SIZES = {
     routeAll: 7,
-    routeDone: 11,
-    routeCasing: 19,
-    aheadRadius: 9,
-    releaseLine: 6
+    routeCasing: 19
+};
+
+/** Levels the zone overlay dims through at the summit (each level = one texture rebuild). */
+const ZONE_DIM_STEPS = 4;
+
+// MapLibre internals used to refresh only the terrain tiles under the avalanche
+// (maplibre-gl 5.21; guarded so a version change degrades to a full refresh).
+type TerrainTile = { tileID: { canonical: { x: number; y: number; z: number } } };
+type TerrainInternals = {
+    terrain?: {
+        tileManager: {
+            getRenderableTiles(): TerrainTile[];
+            freeRtt(tileID?: TerrainTile['tileID']): void;
+        };
+    };
 };
 
 export class JourneyMapLayers {
@@ -102,33 +107,28 @@ export class JourneyMapLayers {
     private sim: SimData | null = null;
     private simCanvas: HTMLCanvasElement | null = null;
     private simImage: ImageData | null = null;
+    private simBounds: [number, number, number, number] | null = null; // w, s, e, n
     private lastSimKey = '';
-    private lastProgress = -1;
     private lastScale = -1;
-    private lastAheadKey = '';
     /** Last frame applied: identical frames (paused clock) are skipped so the map can idle. */
     private lastFrameKey = '';
-    /** The sim texture was flagged for upload last frame; stop uploading this frame. */
-    private simUploadPending = false;
     private readonly paintCache = new Map<string, unknown>();
     private readonly markers: MarkerOverlay;
     private inUpdate = false;
     private lastFrame: JourneyFrame | null = null;
     private markerScale = 1;
-    private readonly aheadStarts: Array<{ dist: number; p: LonLat }>;
 
     constructor(map: MaplibreMap, route: RouteData) {
         this.map = map;
         this.route = route;
-        this.aheadStarts = buildStartZoneList(route);
         // We set the centre elevation ourselves (see CameraView.elevation).
         map.setCenterClampedToGround(false);
         // Dev-only handle for inspecting the live map from the console / test scripts.
         if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__aviMap = map;
         this.addBaseLayers();
-        this.markers = new MarkerOverlay(map);
+        this.markers = new MarkerOverlay(map, route);
         // Renders we didn't drive (tiles arriving while paused can change terrain height
-        // under a marker) re-place the markers with the last frame.
+        // under a marker) re-place the overlay with the last frame.
         map.on('render', () => {
             if (!this.inUpdate && this.lastFrame)
                 this.markers.update(this.lastFrame, this.markerScale);
@@ -144,6 +144,15 @@ export class JourneyMapLayers {
         canvas.height = rows;
         this.simCanvas = canvas;
         this.simImage = new ImageData(cols, rows);
+        const lons = corners.map((c) => c[0]);
+        const lats = corners.map((c) => c[1]);
+        this.simBounds = [
+            Math.min(...lons),
+            Math.min(...lats),
+            Math.max(...lons),
+            Math.max(...lats)
+        ];
+        this.markers.setReleaseRing(release_ring);
 
         const beforeId = this.map.getLayer('route-casing') ? 'route-casing' : undefined;
         // animate: false matters: an animating CanvasSource counts as a permanent transition
@@ -154,71 +163,37 @@ export class JourneyMapLayers {
                 id: 'sim',
                 type: 'raster',
                 source: 'sim',
+                layout: { visibility: 'none' },
+                // Opacity is baked into the canvas pixels instead: changing a paint property
+                // would throw away every cached terrain texture.
                 paint: {
-                    'raster-opacity': 0,
+                    'raster-opacity': 1,
                     'raster-resampling': 'linear',
                     'raster-fade-duration': 0
                 }
             },
             beforeId
         );
-        this.map.addSource('release', {
-            type: 'geojson',
-            data: fc([
-                {
-                    type: 'Feature',
-                    properties: {},
-                    geometry: { type: 'Polygon', coordinates: [release_ring] }
-                }
-            ])
-        });
-        this.map.addLayer(
-            {
-                id: 'release-fill',
-                type: 'fill',
-                source: 'release',
-                paint: { 'fill-color': '#ff5252', 'fill-opacity': 0 }
-            },
-            'sim'
-        );
-        this.map.addLayer(
-            {
-                id: 'release-line',
-                type: 'line',
-                source: 'release',
-                paint: {
-                    'line-color': '#ffffff',
-                    'line-width': 2,
-                    'line-opacity': 0,
-                    'line-dasharray': [2, 1.5]
-                }
-            },
-            beforeId
-        );
-        this.lastScale = -1; // re-apply widths including the release outline
     }
 
     /** Apply one journey frame for the wall region shown by this client. */
     update(frame: JourneyFrame, region: WallRegion, clientWidth: number) {
         const scale = clientWidth / region.w;
-        if (this.simUploadPending) {
-            this.map.getSource<CanvasSource>('sim')?.pause(); // uploads once, then stops
-            this.simUploadPending = false;
-        }
         // Paused clock => same frame every tick. Skip all work so MapLibre stops rendering.
         const key = `${frame.t.toFixed(3)}|${scale.toFixed(4)}|${region.x},${region.y}|${this.sim ? 1 : 0}`;
         if (key === this.lastFrameKey) return;
         this.lastFrameKey = key;
         this.applyCamera(frame, region, scale);
         if (Math.abs(scale - this.lastScale) > 1e-3) this.applyScale(scale);
-        this.updateProgress(frame);
-        this.updateAhead(frame);
-        this.updateSim(frame);
+        const simChanged = this.updateSim(frame);
+        const sim = simChanged ? this.map.getSource<CanvasSource>('sim') : undefined;
         // Render now, inside our animation frame, instead of on MapLibre's next one. The
-        // map then shows exactly this frame's camera, and the SVG markers placed below
-        // (same transform) are presented together with it: no one-frame drift.
+        // map then shows exactly this frame's camera, and the overlay placed below (same
+        // transform) is presented together with it: no one-frame drift.
         this.inUpdate = true;
+        sim?.play(); // flag the new avalanche frame for upload during this render...
         this.map.redraw();
+        sim?.pause(); // ...and stop uploading afterwards
         this.inUpdate = false;
         this.lastFrame = frame;
         this.markerScale = scale;
@@ -299,6 +274,7 @@ export class JourneyMapLayers {
         const map = this.map;
         const firstSymbol = map.getStyle().layers?.find((layer) => layer.type === 'symbol')?.id;
 
+        // Hillshade keeps full DEM detail: it's only shading, so it costs nothing in motion.
         map.addSource('dem', {
             type: 'raster-dem',
             encoding: 'terrarium',
@@ -306,13 +282,14 @@ export class JourneyMapLayers {
             tileSize: 256,
             maxzoom: 14
         });
-        // 3D terrain from a separate DEM source (MapLibre advises not sharing it with hillshade).
+        // 3D terrain mesh from a separate, coarser DEM (~30 m). Fewer detail levels means the
+        // mesh doesn't visibly re-shape as finer tiles arrive, and it's lighter to draw.
         map.addSource('terrain-dem', {
             type: 'raster-dem',
             encoding: 'terrarium',
             tiles: [TERRARIUM_TILES],
             tileSize: 256,
-            maxzoom: 14
+            maxzoom: TERRAIN_MAX_ZOOM
         });
         map.setTerrain({ source: 'terrain-dem', exaggeration: TERRAIN_EXAGGERATION });
         map.setSky({
@@ -363,13 +340,14 @@ export class JourneyMapLayers {
             firstSymbol
         );
 
+        // The whole route, static (dashed). The travelled part is drawn by MarkerOverlay.
         const { lon, lat } = this.route.samples;
         const line: Feature = {
             type: 'Feature',
             properties: {},
             geometry: { type: 'LineString', coordinates: lon.map((x, i) => [x, lat[i]]) }
         };
-        map.addSource('route', { type: 'geojson', data: fc([line]), lineMetrics: true });
+        map.addSource('route', { type: 'geojson', data: fc([line]) });
         const lineLayout = { 'line-cap': 'round', 'line-join': 'round' } as const;
         const layers: LayerSpecification[] = [
             {
@@ -390,34 +368,13 @@ export class JourneyMapLayers {
                     'line-width': 1,
                     'line-dasharray': [1.5, 1.5]
                 }
-            },
-            {
-                id: 'route-done',
-                type: 'line',
-                source: 'route',
-                layout: lineLayout,
-                paint: { 'line-width': 1, 'line-gradient': progressGradient(0) }
             }
         ];
         for (const layer of layers) map.addLayer(layer);
-
-        map.addSource('ahead', { type: 'geojson', data: fc([]) });
-        map.addLayer({
-            id: 'ahead',
-            type: 'circle',
-            source: 'ahead',
-            paint: {
-                'circle-color': ZONE_STYLE[3].color,
-                'circle-opacity': ['get', 'a'],
-                'circle-stroke-color': '#ffffff',
-                'circle-stroke-opacity': ['*', ['get', 'a'], 0.8],
-                'circle-radius': 1,
-                'circle-stroke-width': 1
-            }
-        });
     }
 
     private applyScale(scale: number) {
+        // Only on resize: a paint change rebuilds the cached terrain textures.
         this.lastScale = scale;
         const px = (v: number) => Math.max(0.5, v * scale);
         const set = (layer: string, prop: string, value: number) => {
@@ -425,71 +382,25 @@ export class JourneyMapLayers {
         };
         set('route-casing', 'line-width', px(SIZES.routeCasing));
         set('route-all', 'line-width', px(SIZES.routeAll));
-        set('route-done', 'line-width', px(SIZES.routeDone));
-        set('ahead', 'circle-radius', px(SIZES.aheadRadius));
-        set('ahead', 'circle-stroke-width', px(2));
-        set('release-line', 'line-width', px(SIZES.releaseLine));
     }
 
-    private updateProgress(frame: JourneyFrame) {
-        const p = clamp(frame.dist / this.route.total_m, 0, 1);
-        // Paint-property recompiles are cheap but not free: skip sub-pixel changes.
-        if (Math.abs(p - this.lastProgress) < 0.0004) return;
-        this.lastProgress = p;
-        this.map.setPaintProperty('route-done', 'line-gradient', progressGradient(p));
-    }
-
-    private updateAhead(frame: JourneyFrame) {
-        const visible = frame.phase === 'travel';
-        const d = frame.dist;
-        // Coarse key: refresh when the traveller has moved ~20 m or visibility flips.
-        const key = visible ? String(Math.round(d / 20)) : 'off';
-        if (key === this.lastAheadKey) return;
-        this.lastAheadKey = key;
-        const features: Feature[] = [];
-        if (visible) {
-            for (const s of this.aheadStarts) {
-                const ahead = s.dist - d;
-                if (ahead < -60 || ahead > AHEAD_M) continue;
-                const a =
-                    ahead < 0
-                        ? smoothstep(-60, 0, ahead)
-                        : 1 - smoothstep(AHEAD_M * 0.5, AHEAD_M, ahead);
-                features.push({
-                    type: 'Feature',
-                    properties: { a: a * 0.75 },
-                    geometry: { type: 'Point', coordinates: s.p }
-                });
-            }
-        }
-        this.map.getSource<GeoJSONSource>('ahead')?.setData(fc(features));
-    }
-
+    /** Returns true when a new avalanche image was drawn and needs uploading. */
     private updateSim(frame: JourneyFrame) {
-        if (!this.sim || !this.simCanvas || !this.simImage) return;
+        // Dim the zone overlay at the summit in a few discrete steps (each step rebuilds the
+        // terrain textures once) rather than a continuous fade (a rebuild every frame).
+        const dim = Math.round(frame.simFocus * ZONE_DIM_STEPS) / ZONE_DIM_STEPS;
+        this.setPaint('zones', 'raster-opacity', ZONES_OPACITY * (1 - 0.65 * dim));
+        if (!this.sim || !this.simCanvas || !this.simImage) return false;
         const visible = frame.simTime !== null && frame.simOpacity > 0.001;
-        this.setPaint('zones', 'raster-opacity', ZONES_OPACITY * (1 - 0.65 * frame.simFocus));
-        // Hidden layers are switched off entirely rather than drawn at opacity 0.
+        // Visibility flips only at phase changes.
         this.setLayout('sim', 'visibility', visible ? 'visible' : 'none');
-        this.setLayout(
-            'release-fill',
-            'visibility',
-            frame.releaseOpacity > 0.001 ? 'visible' : 'none'
-        );
-        this.setLayout(
-            'release-line',
-            'visibility',
-            frame.releaseOpacity > 0.001 ? 'visible' : 'none'
-        );
-        this.setPaint('sim', 'raster-opacity', visible ? frame.simOpacity : 0);
-        this.setPaint('release-fill', 'fill-opacity', frame.releaseOpacity * 0.45);
-        this.setPaint('release-line', 'line-opacity', frame.releaseOpacity);
-        if (!visible || frame.simTime === null) return;
+        if (!visible || frame.simTime === null) return false;
 
         const { meta, frames } = this.sim;
         const fpos = clamp(frame.simTime / meta.frame_dt_s, 0, meta.frames - 1);
-        const key = fpos.toFixed(2);
-        if (key === this.lastSimKey) return;
+        const opacity = Math.round(frame.simOpacity * 100) / 100;
+        const key = `${fpos.toFixed(2)}|${opacity}`;
+        if (key === this.lastSimKey) return false;
         this.lastSimKey = key;
         drawSimFrame(
             this.simImage,
@@ -498,16 +409,34 @@ export class JourneyMapLayers {
             meta.cols,
             fpos,
             meta.depth_scale_m,
-            meta.speed_scale_ms
+            meta.speed_scale_ms,
+            opacity
         );
-        const ctx = this.simCanvas.getContext('2d');
-        ctx?.putImageData(this.simImage, 0, 0);
-        // play() flags a texture upload and requests a repaint; pause() next tick ends it.
-        this.map.getSource<CanvasSource>('sim')?.play();
-        this.simUploadPending = true;
+        this.simCanvas.getContext('2d')?.putImageData(this.simImage, 0, 0);
+        this.refreshTerrainTilesUnderSim();
+        return true;
     }
 
-    /** setPaintProperty only when the value really changed (each call restyles the layer). */
+    /**
+     * With 3D terrain, the avalanche is painted into the cached textures of the terrain
+     * tiles beneath it, and a new canvas frame does not refresh that cache by itself (this
+     * is what froze the avalanche part-way through). Invalidate just those few tiles.
+     */
+    private refreshTerrainTilesUnderSim() {
+        const manager = (this.map as unknown as TerrainInternals).terrain?.tileManager;
+        if (!manager || !this.simBounds) return;
+        const [w, s, e, n] = this.simBounds;
+        for (const tile of manager.getRenderableTiles()) {
+            const { x, y, z } = tile.tileID.canonical;
+            const tw = tileLon(x, z);
+            const te = tileLon(x + 1, z);
+            const tn = tileLat(y, z);
+            const ts = tileLat(y + 1, z);
+            if (tw < e && te > w && ts < n && tn > s) manager.freeRtt(tile.tileID);
+        }
+    }
+
+    /** setPaintProperty only when the value really changed (each call rebuilds terrain textures). */
     private setPaint(layer: string, prop: string, value: number) {
         const rounded = Math.round(value * 400) / 400;
         const k = `p|${layer}|${prop}`;
@@ -524,34 +453,9 @@ export class JourneyMapLayers {
     }
 }
 
-function progressGradient(p: number): ExpressionSpecification {
-    // Travelled part solid white, rest transparent (the dashed `route-all` shows it).
-    if (p <= 0)
-        return [
-            'interpolate',
-            ['linear'],
-            ['line-progress'],
-            0,
-            'rgba(255,255,255,0)',
-            1,
-            'rgba(255,255,255,0)'
-        ];
-    if (p >= 1) return ['interpolate', ['linear'], ['line-progress'], 0, '#ffffff', 1, '#ffffff'];
-    return ['step', ['line-progress'], '#ffffff', p, 'rgba(255,255,255,0)'];
-}
-
-function buildStartZoneList(route: RouteData) {
-    // First route distance at which each distinct start zone becomes relevant.
-    const seen = new Map<string, { dist: number; p: LonLat }>();
-    const { src, dist } = route.samples;
-    for (let i = 0; i < src.length; i++) {
-        const s = src[i];
-        if (!s) continue;
-        const key = `${s[0]},${s[1]}`;
-        if (!seen.has(key)) seen.set(key, { dist: dist[i], p: s });
-    }
-    return [...seen.values()];
-}
+const tileLon = (x: number, z: number) => (x / 2 ** z) * 360 - 180;
+const tileLat = (y: number, z: number) =>
+    (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / 2 ** z))) * 180) / Math.PI;
 
 // Speed ramp for the flowing avalanche: pale snow (slow) -> blue -> violet -> hot pink (fast)
 const SPEED_STOPS: Array<[number, [number, number, number]]> = [
@@ -586,7 +490,8 @@ function drawSimFrame(
     cols: number,
     fpos: number,
     depthScale: number,
-    speedScale: number
+    speedScale: number,
+    opacity: number
 ) {
     const plane = rows * cols;
     const f0 = Math.floor(fpos);
@@ -607,6 +512,6 @@ function drawSimFrame(
         out[o] = r;
         out[o + 1] = g;
         out[o + 2] = b;
-        out[o + 3] = Math.round(255 * (0.35 + 0.65 * smoothstep(0.01, 0.6, depth)));
+        out[o + 3] = Math.round(255 * opacity * (0.35 + 0.65 * smoothstep(0.01, 0.6, depth)));
     }
 }

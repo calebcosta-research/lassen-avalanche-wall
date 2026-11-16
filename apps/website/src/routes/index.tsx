@@ -18,13 +18,22 @@ type WallScreen = {
     id: string;
 };
 
+type Demo = 'cities' | 'avalanche';
+
 export const Route = createFileRoute('/')({
+    // `?demo=avalanche` points the simulated wall and tablets at the avalanche journey.
+    validateSearch: (search: Record<string, unknown>): { demo?: Demo } =>
+        search.demo === 'avalanche' ? { demo: 'avalanche' } : {},
     component: HomePage
 });
 
 function HomePage() {
     const { theme, setTheme } = useTheme();
     const isDark = theme === 'dark';
+    const { demo = 'cities' } = Route.useSearch();
+    const navigate = Route.useNavigate();
+    const screenPath = demo === 'avalanche' ? '/avalanche/screen' : '/screen';
+    const controlPath = demo === 'avalanche' ? '/avalanche/control' : '/control';
 
     const wallScreens = useMemo<WallScreen[]>(() => {
         // Build a 3x2 wall coordinate system.
@@ -47,8 +56,8 @@ function HomePage() {
 
     const controlPanels = [
         // Distinct operator identities simulate simultaneous collaboration.
-        { id: 'a', label: 'Tablet #1', src: '/control?operator=A' },
-        { id: 'b', label: 'Tablet #2', src: '/control?operator=B' }
+        { id: 'a', label: 'Tablet #1', src: `${controlPath}?operator=A` },
+        { id: 'b', label: 'Tablet #2', src: `${controlPath}?operator=B` }
     ];
 
     const toggleDisconnect = (id: string) => {
@@ -69,7 +78,9 @@ function HomePage() {
         const nonce = refreshNonceById[screen.id] ?? 0;
         const disconnected = disconnectedById[screen.id] ?? false;
 
-        return disconnected ? `/noop?v=${nonce}` : `/screen?c=${screen.c}&r=${screen.r}&v=${nonce}`;
+        return disconnected
+            ? `/noop?v=${nonce}`
+            : `${screenPath}?c=${screen.c}&r=${screen.r}&v=${nonce}`;
     };
 
     const toggleControlDisconnect = (id: string) => {
@@ -99,6 +110,22 @@ function HomePage() {
                 <h1 className="text-lg font-semibold tracking-tight md:text-xl">
                     DO Dev Playground
                 </h1>
+                <div className="mr-3 ml-auto flex gap-1 rounded-lg border border-[var(--border)] bg-[var(--card)] p-1 text-xs">
+                    {(['cities', 'avalanche'] as const).map((option) => (
+                        <button
+                            key={option}
+                            type="button"
+                            onClick={() =>
+                                void navigate({
+                                    search: option === 'avalanche' ? { demo: 'avalanche' } : {}
+                                })
+                            }
+                            className={`cursor-pointer rounded-md px-2 py-1 capitalize ${demo === option ? 'bg-[var(--primary)] text-[var(--primary-foreground)]' : 'text-[var(--muted-foreground)]'}`}
+                        >
+                            {option} demo
+                        </button>
+                    ))}
+                </div>
                 <button
                     type="button"
                     onClick={() => setTheme(isDark ? 'light' : 'dark')}

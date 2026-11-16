@@ -1,6 +1,14 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { defineHooks } from 'crossws';
 
+import {
+    AVI_CLOCK_MESSAGE,
+    AVI_PING_MESSAGE,
+    AVI_PONG_MESSAGE,
+    DEFAULT_JOURNEY_CLOCK,
+    sanitizeClockIntent,
+    type JourneyClock
+} from '../lib/avalanche/clock';
 import type {
     BusMessage,
     BusSharedState,
@@ -18,6 +26,10 @@ const busSharedState: BusSharedState = {
     selectedSegmentIndexes: []
 };
 
+// Avalanche journey clock. The bus is the single time authority: it stamps every
+// accepted change with its own clock so all screens anchor to the same instant.
+let aviClock: JourneyClock = { ...DEFAULT_JOURNEY_CLOCK, anchorServerMs: Date.now() };
+
 const hooks = defineHooks({
     open(peer) {
         // `hello` is our bootstrap packet:
@@ -25,7 +37,8 @@ const hooks = defineHooks({
         peer.send({
             type: 'hello',
             peerId: peer.id,
-            state: busSharedState
+            serverTime: Date.now(),
+            state: { ...busSharedState, aviClock }
         });
 
         // All collaborating clients publish/subscribe on one logical channel (`do`).
@@ -47,6 +60,31 @@ const hooks = defineHooks({
         } catch {
             return;
         }
+        if (payload.type === AVI_PING_MESSAGE) {
+            // NTP-style probe: echo the client's send time with ours, to the sender only.
+            if (typeof payload.sentAt !== 'number') return;
+            peer.send({ type: AVI_PONG_MESSAGE, sentAt: payload.sentAt, serverTime: Date.now() });
+            return;
+        }
+
+        if (payload.type === AVI_CLOCK_MESSAGE) {
+            const intent = sanitizeClockIntent(payload.clock);
+            if (!intent) return;
+            const now = Date.now();
+            aviClock = { ...intent, anchorServerMs: now, revision: aviClock.revision + 1 };
+            const stamped = {
+                type: AVI_CLOCK_MESSAGE,
+                clock: aviClock,
+                serverTime: now,
+                peerId: peer.id,
+                peerCount: peer.peers.size
+            };
+            // publish() skips the sender, who also needs the server-stamped anchor.
+            peer.publish('do', stamped);
+            peer.send(stamped);
+            return;
+        }
+
         updateBusSharedState(payload);
 
         // Broadcast to all peers. Each client engine can ignore own echoes via peerId.

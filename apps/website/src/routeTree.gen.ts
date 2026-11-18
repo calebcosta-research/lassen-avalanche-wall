@@ -14,6 +14,8 @@ import { Route as NoopRouteImport } from './routes/noop'
 import { Route as ControlRouteImport } from './routes/control'
 import { Route as BusRouteImport } from './routes/bus'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AvalancheScreenRouteImport } from './routes/avalanche.screen'
+import { Route as AvalancheControlRouteImport } from './routes/avalanche.control'
 
 const ScreenRoute = ScreenRouteImport.update({
   id: '/screen',
@@ -40,6 +42,16 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AvalancheScreenRoute = AvalancheScreenRouteImport.update({
+  id: '/avalanche/screen',
+  path: '/avalanche/screen',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AvalancheControlRoute = AvalancheControlRouteImport.update({
+  id: '/avalanche/control',
+  path: '/avalanche/control',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -47,6 +59,8 @@ export interface FileRoutesByFullPath {
   '/control': typeof ControlRoute
   '/noop': typeof NoopRoute
   '/screen': typeof ScreenRoute
+  '/avalanche/control': typeof AvalancheControlRoute
+  '/avalanche/screen': typeof AvalancheScreenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -54,6 +68,8 @@ export interface FileRoutesByTo {
   '/control': typeof ControlRoute
   '/noop': typeof NoopRoute
   '/screen': typeof ScreenRoute
+  '/avalanche/control': typeof AvalancheControlRoute
+  '/avalanche/screen': typeof AvalancheScreenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -62,13 +78,37 @@ export interface FileRoutesById {
   '/control': typeof ControlRoute
   '/noop': typeof NoopRoute
   '/screen': typeof ScreenRoute
+  '/avalanche/control': typeof AvalancheControlRoute
+  '/avalanche/screen': typeof AvalancheScreenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/bus' | '/control' | '/noop' | '/screen'
+  fullPaths:
+    | '/'
+    | '/bus'
+    | '/control'
+    | '/noop'
+    | '/screen'
+    | '/avalanche/control'
+    | '/avalanche/screen'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/bus' | '/control' | '/noop' | '/screen'
-  id: '__root__' | '/' | '/bus' | '/control' | '/noop' | '/screen'
+  to:
+    | '/'
+    | '/bus'
+    | '/control'
+    | '/noop'
+    | '/screen'
+    | '/avalanche/control'
+    | '/avalanche/screen'
+  id:
+    | '__root__'
+    | '/'
+    | '/bus'
+    | '/control'
+    | '/noop'
+    | '/screen'
+    | '/avalanche/control'
+    | '/avalanche/screen'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -77,6 +117,8 @@ export interface RootRouteChildren {
   ControlRoute: typeof ControlRoute
   NoopRoute: typeof NoopRoute
   ScreenRoute: typeof ScreenRoute
+  AvalancheControlRoute: typeof AvalancheControlRoute
+  AvalancheScreenRoute: typeof AvalancheScreenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -116,6 +158,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/avalanche/screen': {
+      id: '/avalanche/screen'
+      path: '/avalanche/screen'
+      fullPath: '/avalanche/screen'
+      preLoaderRoute: typeof AvalancheScreenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/avalanche/control': {
+      id: '/avalanche/control'
+      path: '/avalanche/control'
+      fullPath: '/avalanche/control'
+      preLoaderRoute: typeof AvalancheControlRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -125,6 +181,8 @@ const rootRouteChildren: RootRouteChildren = {
   ControlRoute: ControlRoute,
   NoopRoute: NoopRoute,
   ScreenRoute: ScreenRoute,
+  AvalancheControlRoute: AvalancheControlRoute,
+  AvalancheScreenRoute: AvalancheScreenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

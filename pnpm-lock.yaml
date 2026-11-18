@@ -18,6 +18,12 @@ catalogs:
     '@deck.gl/react':
       specifier: ^9.1.12
       version: 9.2.11
+    '@fontsource/barlow':
+      specifier: ^5.3.0
+      version: 5.3.0
+    '@fontsource/barlow-condensed':
+      specifier: ^5.3.0
+      version: 5.3.0
     '@phosphor-icons/react':
       specifier: ^2.1.10
       version: 2.1.10
@@ -108,6 +114,12 @@ importers:
       '@deck.gl/react':
         specifier: 'catalog:'
         version: 9.2.11(@deck.gl/core@9.2.11)(@deck.gl/widgets@9.2.11(@deck.gl/core@9.2.11)(@luma.gl/core@9.2.6))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@fontsource/barlow':
+        specifier: 'catalog:'
+        version: 5.3.0
+      '@fontsource/barlow-condensed':
+        specifier: 'catalog:'
+        version: 5.3.0
       '@phosphor-icons/react':
         specifier: 'catalog:'
         version: 2.1.10(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -494,6 +506,12 @@ packages:
 
   '@floating-ui/utils@0.2.11':
     resolution: {integrity: sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg==}
+
+  '@fontsource/barlow-condensed@5.3.0':
+    resolution: {integrity: sha512-RA7MmIx0v3eQ6Gcf74qLVLOwLB0GpPOzx+eU9iG/AmCnSJGcIWYeU8y6CEMGZ210MGwGg5CZhzLkkvyZdTTk1g==}
+
+  '@fontsource/barlow@5.3.0':
+    resolution: {integrity: sha512-tGR0y6QObRtKv71MOth44222+mdNFM/ZWFWDV1VLzNbG4oK9PNRlyJzmkck4vHAi9ibHBXgt4SlY51amFP55CA==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -2784,6 +2802,10 @@ snapshots:
       react-dom: 19.2.4(react@19.2.4)
 
   '@floating-ui/utils@0.2.11': {}
+
+  '@fontsource/barlow-condensed@5.3.0': {}
+
+  '@fontsource/barlow@5.3.0': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
